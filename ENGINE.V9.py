@@ -1638,36 +1638,90 @@ tbody td{padding:5px 10px;vertical-align:middle}
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   html,body{background:#fff!important}
-  body{font-size:8.6pt!important;line-height:1.42!important}
-  /* contenu calé sur la zone imprimable -> proportions identiques, jamais de mise à l'échelle */
+  /* Taille de base réduite pour densifier le rendu — cible: ~2 setups/page */
+  body{font-size:7.2pt!important;line-height:1.35!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
-  .wrap{padding:0!important}
-  /* en-tête de doc : visible seulement sur la 1re page, le reste passe en marge @page */
-  .page-header{border-radius:6px 6px 0 0!important;box-shadow:none!important;padding:10px 16px!important}
-  .page-subbar{box-shadow:none!important;padding:6px 16px!important;gap:14px!important}
-  /* CORRECTIF CRITIQUE : overflow:hidden empêche WeasyPrint de fragmenter le contenu
-     => les sections et cartes doivent être fragmentables (overflow:visible) */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:8px!important}
-  .setup{overflow:visible!important;box-shadow:none!important}
-  /* .section ne doit PAS avoir break-inside:avoid — trop grand, ça crée des pages vides.
-     On laisse les sections se fragmenter naturellement entre les setups. */
-  .sec-body{overflow:visible!important}
-  /* anti-coupure au niveau de la CARTE (unité minimale non-fragmentable) */
-  .setup{break-inside:avoid!important;page-break-inside:avoid!important}
-  .setup-body{padding:9px 14px!important}
-  .factor-grid,.metrics-grid,.px-grid{break-inside:avoid!important;page-break-inside:avoid!important}
-  .rationale,.audit-block,.banner,.cal-row,.flags-row{break-inside:avoid!important;page-break-inside:avoid!important}
-  .sec-hdr,.setup-hdr{break-after:avoid!important;page-break-after:avoid!important}
-  .sub-lbl{break-after:avoid!important;page-break-after:avoid!important}
-  /* saut de page propre avant la section 2 (Éliminés) */
+  .wrap{padding:0 4px!important}
+
+  /* ── EN-TÊTE : compact, ne doit pas voler de l'espace ── */
+  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:6px 12px!important}
+  .sys-name{font-size:14px!important}
+  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
+  .logo-marker{width:24px!important;height:24px!important}
+  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important}
+
+  /* ── SECTION : overflow visible pour permettre la fragmentation ── */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important}
+  .sec-body{overflow:visible!important;padding:6px 10px!important}
+  .sec-hdr{padding:5px 10px!important}
+  .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
+  .sec-ttl{font-size:8pt!important}
+  .sec-sub{font-size:7pt!important}
+
+  /* ── SETUP CARD : overflow visible, anti-coupure maintenu ── */
+  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:5px!important;
+         break-inside:avoid!important;page-break-inside:avoid!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important}
+  .setup-body{padding:6px 10px!important}
+  .pair{font-size:12px!important}
+  .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
+  .scen-lbl{font-size:7pt!important}
+  .cluster-tag{font-size:7pt!important}
+
+  /* ── GRILLES DE FACTEURS & MÉTRIQUES : moins de padding ── */
+  .factor-grid{padding:5px 6px!important;gap:3px!important;margin-bottom:5px!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
+  .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .factor-val{font-size:9pt!important}
+  .metrics-grid{padding:5px 6px!important;gap:3px!important;margin-bottom:5px!important;
+                break-inside:avoid!important;page-break-inside:avoid!important}
+  .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .metric-val{font-size:9pt!important}
+
+  /* ── GRILLE PRIX (entry/SL/TP) ── */
+  .px-grid{gap:4px!important;margin-bottom:5px!important;
+           break-inside:avoid!important;page-break-inside:avoid!important}
+  .px-card{padding:4px 6px!important}
+  .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .px-val{font-size:10pt!important}
+  .px-sub{font-size:6.5pt!important;margin-top:1px!important}
+
+  /* ── RATIONALE & AUDIT : compacts ── */
+  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:7pt!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
+  .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
+  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:6.5pt!important;
+               line-height:1.4!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
+  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
+           break-inside:avoid!important;page-break-inside:avoid!important}
+  .flags-row{gap:4px!important;margin-bottom:5px!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
+  .flag{font-size:6.5pt!important;padding:1px 5px!important}
+  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;
+          break-inside:avoid!important;page-break-inside:avoid!important}
+
+  /* ── SECTION 2 (éliminés) : saut de page propre ── */
   .section + .section{break-before:page!important;page-break-before:always!important}
+  .sec-hdr,.setup-hdr{break-after:avoid!important;page-break-after:avoid!important}
+  .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
+  .elim{padding:5px 8px!important;margin-bottom:4px!important}
+  .elim-pair{font-size:8pt!important;min-width:60px!important}
+  .elim-txt{font-size:7pt!important}
+
+  /* ── TABLE des rejets ── */
+  table{font-size:7pt!important}
+  thead th{padding:4px 7px!important;font-size:6.5pt!important}
+  tbody td{padding:3px 7px!important}
   tr,thead{break-inside:avoid!important;page-break-inside:avoid!important}
-  thead{display:table-header-group!important}            /* en-têtes de table répétés */
+  thead{display:table-header-group!important}
   tfoot{display:table-footer-group!important}
+  .reject-code{font-size:7pt!important}
+
   p,li{orphans:3;widows:3}
-  .footer{display:none!important}                          /* remplacé par @page @bottom-* */
+  .footer{display:none!important}
   #pdf-fab{display:none!important}
-  a[href]:after{content:""!important}                      /* pas d'URLs parasites */
+  a[href]:after{content:""!important}
 }
 #pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
 #pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
