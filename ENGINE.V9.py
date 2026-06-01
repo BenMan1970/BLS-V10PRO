@@ -1618,22 +1618,35 @@ tbody td{padding:5px 10px;vertical-align:middle}
 @page{
   size:A4 portrait;
   margin:14mm 12mm 16mm 12mm;
+  @top-left{
+    content:"BLUESTAR · FX CASCADE";
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#1B45B4;font-weight:700;letter-spacing:.1em;
+  }
   @top-center{
-    content:"BLUESTAR · FX CASCADE — {{date_hdr}}";
-    font-family:'IBM Plex Mono',monospace;font-size:7pt;color:#6B89D8;letter-spacing:.12em;
+    content:"{{date_hdr}}";
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
+  }
+  @top-right{
+    content:"Page " counter(page) " / " counter(pages);
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
   }
   @bottom-left{
-    content:"CONFIDENTIEL";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.12em;
+    content:"CONFIDENTIEL · USAGE INTERNE";
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
   }
   @bottom-center{
     content:"BLUESTAR SYSTEM v10 HYBRID V4";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.12em;
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
   }
   @bottom-right{
-    content:"Page " counter(page) " / " counter(pages);
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
+    content:"Score absolu · Quantile départage";
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
   }
+}
+@page:first{
+  @top-left{content:""}
+  @top-center{content:""}
+  @top-right{content:""}
 }
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
@@ -1718,11 +1731,34 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
+  /* Repère contextuel : caché écran, affiché en print sur toutes les pages de continuation.
+     Positionné dans le flux avant les setups — sur page 1 il est masqué car le sec-hdr suffit.
+     Sur pages 2+, il apparaît en haut du fragment de section, donnant le contexte. */
+  .print-ctx-bar{
+    display:block!important;
+    font-family:var(--mono)!important;font-size:6pt!important;font-weight:700!important;
+    color:var(--royal)!important;background:var(--royal-light)!important;
+    border:1px solid var(--royal-dim)!important;border-radius:4px!important;
+    padding:3px 10px!important;margin-bottom:6px!important;
+    letter-spacing:.06em!important;text-transform:uppercase!important;
+  }
+  /* Blackout grid compact en print */
+  .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
+  .sus-item{padding:3px 7px!important}
+  .sus-item-pair{font-size:8pt!important}
+  .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
   .footer{display:none!important}
   #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
+/* Context bar : masqué écran, repère contextuel print pages 2+ */
+.print-ctx-bar{display:none}
+/* Blackout grid compact */
+.sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
+.sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
+.sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
+.sus-item-txt{font-size:9px;color:var(--muted)}
 #pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
 #pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 </style>
@@ -1752,6 +1788,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
+  <div class="print-ctx-bar">§1 SETUPS VALIDES &nbsp;·&nbsp; {{n_setups}} validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : {{event_risk}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
@@ -1812,9 +1849,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
   {% set rejets = elimines | rejectattr('reject_code', 'equalto', 'CAL_BLACKOUT') | list %}
   {% if suspendus %}
   <div class="sub-lbl">SUSPENDUS — Calendrier ({{suspendus|length}})</div>
+  <div class="sus-grid">
   {% for e in suspendus %}
-  <div class="elim sus"><span class="elim-pair">{{e.symbol}}</span><div><span class="cal-blackout" style="display:inline-flex;margin-bottom:4px">BLACKOUT</span><div class="elim-txt">{{e.reject_detail}} · RSI H4 : {{e.rsi_h4|round(2) if e.rsi_h4 else '—'}} · Age : {{e.age_d1}}j</div></div></div>
+  <div class="sus-item"><span class="sus-item-pair">{{e.symbol}}</span><span class="sus-item-txt">RSI H4 : {{e.rsi_h4|round(2) if e.rsi_h4 else '—'}} · Age : {{e.age_d1}}j</span></div>
   {% endfor %}
+  </div>
   <hr class="div">
   {% endif %}
   {% if rejets %}
