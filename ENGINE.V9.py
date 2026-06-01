@@ -1672,7 +1672,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sec-sub{font-size:7pt!important}
 
   /* ── SETUP CARD : overflow visible, anti-coupure maintenu ── */
-  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:5px!important;
+  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:4px!important;
          break-inside:avoid!important;page-break-inside:avoid!important}
   .setup-hdr{padding:5px 10px!important;gap:6px!important}
   .setup-body{padding:6px 10px!important}
@@ -1682,17 +1682,17 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .cluster-tag{font-size:7pt!important}
 
   /* ── GRILLES DE FACTEURS & MÉTRIQUES : moins de padding ── */
-  .factor-grid{padding:5px 6px!important;gap:3px!important;margin-bottom:5px!important;
+  .factor-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
   .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .factor-val{font-size:9pt!important}
-  .metrics-grid{padding:5px 6px!important;gap:3px!important;margin-bottom:5px!important;
+  .metrics-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
                 break-inside:avoid!important;page-break-inside:avoid!important}
   .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .metric-val{font-size:9pt!important}
 
   /* ── GRILLE PRIX (entry/SL/TP) ── */
-  .px-grid{gap:4px!important;margin-bottom:5px!important;
+  .px-grid{gap:3px!important;margin-bottom:4px!important;
            break-inside:avoid!important;page-break-inside:avoid!important}
   .px-card{padding:4px 6px!important}
   .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
@@ -1700,11 +1700,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .px-sub{font-size:6.5pt!important;margin-top:1px!important}
 
   /* ── RATIONALE & AUDIT : compacts ── */
-  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:7pt!important;
+  .rationale{padding:4px 7px!important;margin-bottom:4px!important;font-size:6.5pt!important;
              break-inside:avoid!important;page-break-inside:avoid!important}
   .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
-  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:6.5pt!important;
-               line-height:1.4!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block{padding:4px 7px!important;margin-top:4px!important;font-size:5.8pt!important;
+               line-height:1.28!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
   .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
            break-inside:avoid!important;page-break-inside:avoid!important}
@@ -1731,16 +1731,17 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* Repère contextuel : caché écran, affiché en print sur toutes les pages de continuation.
-     Positionné dans le flux avant les setups — sur page 1 il est masqué car le sec-hdr suffit.
-     Sur pages 2+, il apparaît en haut du fragment de section, donnant le contexte. */
+  /* Bandeau meta-info : affiché sous le sec-hdr en print.
+     Page 1: complète le sec-hdr avec les KPIs clés.
+     Pages 2+: fournit le contexte de section sans sec-hdr. */
   .print-ctx-bar{
     display:block!important;
-    font-family:var(--mono)!important;font-size:6pt!important;font-weight:700!important;
-    color:var(--royal)!important;background:var(--royal-light)!important;
-    border:1px solid var(--royal-dim)!important;border-radius:4px!important;
-    padding:3px 10px!important;margin-bottom:6px!important;
-    letter-spacing:.06em!important;text-transform:uppercase!important;
+    font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
+    color:var(--sec)!important;background:var(--card)!important;
+    border-top:none!important;border-left:none!important;border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
+    padding:2px 10px!important;margin-bottom:5px!important;
+    letter-spacing:.04em!important;
   }
   /* Blackout grid compact en print */
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
@@ -1788,7 +1789,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
-  <div class="print-ctx-bar">§1 SETUPS VALIDES &nbsp;·&nbsp; {{n_setups}} validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : {{event_risk}}</div>
+  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
