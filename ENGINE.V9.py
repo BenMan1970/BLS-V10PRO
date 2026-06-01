@@ -1731,9 +1731,9 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* Bandeau meta-info : affiché sous le sec-hdr en print.
-     Page 1: complète le sec-hdr avec les KPIs clés.
-     Pages 2+: fournit le contexte de section sans sec-hdr. */
+  /* Bandeau meta-info : caché écran, affiché en print.
+     Avant setup 1 : sous le sec-hdr (contexte initial).
+     Avant setups 3,5 : repère de continuation en haut de nouvelle page. */
   .print-ctx-bar{
     display:block!important;
     font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
@@ -1742,6 +1742,17 @@ tbody td{padding:5px 10px;vertical-align:middle}
     border-bottom:1px solid var(--border)!important;
     padding:2px 10px!important;margin-bottom:5px!important;
     letter-spacing:.04em!important;
+  }
+  /* ctx-bar avec page-break : force une nouvelle page AVANT le bandeau */
+  .print-ctx-bar.print-pb{
+    break-before:page!important;
+    page-break-before:always!important;
+    margin-top:0!important;
+  }
+  /* Audit trail compact (dernière carte) : tout sur 2 lignes max */
+  .audit-compact{
+    white-space:normal!important;
+    line-height:1.25!important;
   }
   /* Blackout grid compact en print */
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
@@ -1789,12 +1800,12 @@ tbody td{padding:5px 10px;vertical-align:middle}
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
-  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
   {% set cv = s.conviction.value|lower %}
   {% set fs = s.factor_scores %}
+  {% if loop.first %}<div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>{% elif loop.index is odd %}<div class="print-ctx-bar print-pb">§{{loop.index}}/{{n_setups}} &nbsp;·&nbsp; {{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong></div>{% endif %}
   <div class="setup {{cv}}">
     <div class="setup-hdr {{dc}}">
       <span class="pair">{{s.symbol}}</span>
@@ -1833,7 +1844,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
       {% if s.capped_reason %}<div class="cap-note">Plafond conviction appliqué : {{s.capped_reason}}</div>{% endif %}
       <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
       <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
+      {% if loop.last %}
+      <div class="audit-block audit-compact"><strong>Audit Trail</strong>{{s.sl_detail}} &nbsp;|&nbsp; {{s.rr_detail}} &nbsp;|&nbsp; score={{ '%.4f'|format(fs.absolute_mean) }} · q={{ '%.4f'|format(fs.quantile) }} · ATR={{s.atr_source}} · cluster={{s.cluster}}</div>
+      {% else %}
       <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
+      {% endif %}
     </div>
   </div>
   {% endfor %}
