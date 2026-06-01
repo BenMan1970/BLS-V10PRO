@@ -1645,14 +1645,22 @@ tbody td{padding:5px 10px;vertical-align:middle}
   /* en-tête de doc : visible seulement sur la 1re page, le reste passe en marge @page */
   .page-header{border-radius:6px 6px 0 0!important;box-shadow:none!important;padding:10px 16px!important}
   .page-subbar{box-shadow:none!important;padding:6px 16px!important;gap:14px!important}
-  /* anti-coupure — cause n°1 d'un PDF "pas pro" */
-  .section{break-inside:avoid!important;page-break-inside:avoid!important;box-shadow:none!important;margin-bottom:8px!important}
-  .setup{break-inside:avoid!important;page-break-inside:avoid!important;box-shadow:none!important}
+  /* CORRECTIF CRITIQUE : overflow:hidden empêche WeasyPrint de fragmenter le contenu
+     => les sections et cartes doivent être fragmentables (overflow:visible) */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:8px!important}
+  .setup{overflow:visible!important;box-shadow:none!important}
+  /* .section ne doit PAS avoir break-inside:avoid — trop grand, ça crée des pages vides.
+     On laisse les sections se fragmenter naturellement entre les setups. */
+  .sec-body{overflow:visible!important}
+  /* anti-coupure au niveau de la CARTE (unité minimale non-fragmentable) */
+  .setup{break-inside:avoid!important;page-break-inside:avoid!important}
   .setup-body{padding:9px 14px!important}
   .factor-grid,.metrics-grid,.px-grid{break-inside:avoid!important;page-break-inside:avoid!important}
   .rationale,.audit-block,.banner,.cal-row,.flags-row{break-inside:avoid!important;page-break-inside:avoid!important}
   .sec-hdr,.setup-hdr{break-after:avoid!important;page-break-after:avoid!important}
   .sub-lbl{break-after:avoid!important;page-break-after:avoid!important}
+  /* saut de page propre avant la section 2 (Éliminés) */
+  .section + .section{break-before:page!important;page-break-before:always!important}
   tr,thead{break-inside:avoid!important;page-break-inside:avoid!important}
   thead{display:table-header-group!important}            /* en-têtes de table répétés */
   tfoot{display:table-footer-group!important}
