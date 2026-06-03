@@ -586,6 +586,7 @@ class V4Config:
     LIMIT_ZONE_MAX_DIST: float = 2.0
     TP1_ATR_MULT: float = 2.0
     TP2_ATR_MULT: float = 1.0
+    TP_MAX_ATR_MULT: float = 4.0       # Garde: zone SR utilisée comme TP doit être ≤ 4×ATR
     # selection
     MAX_SETUPS: int = 5
     MAX_EXPOSURE_PER_CCY: int = 2
@@ -1027,11 +1028,21 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
     detail = f"Raw SL={sl_raw:.5f} ({bb_regime} ×{bb_mult})"
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
+        # Vérifier que la zone est VRAIMENT derrière le SL (du bon côté du trade)
         if direction is Direction.BULLISH:
-            sl = min(sl_raw, z.level - 0.3 * atr)
+            sl_candidate = z.level - 0.3 * atr
+            if sl_candidate < sl_raw:
+                sl = sl_candidate
+                detail += f" zone-adj→{sl:.5f}"
+            else:
+                detail += f" [zone {z.level:.5f} au-dessus du SL, pas d'ajustement]"
         elif direction is Direction.BEARISH:
-            sl = max(sl_raw, z.level + 0.3 * atr)
-        detail += f" zone-adj→{sl:.5f}"
+            sl_candidate = z.level + 0.3 * atr
+            if sl_candidate > sl_raw:
+                sl = sl_candidate
+                detail += f" zone-adj→{sl:.5f}"
+            else:
+                detail += f" [zone {z.level:.5f} sous le SL, pas d'ajustement]"
     min_dist = atr * cfg.SL_FLOOR_MULT
     if abs(entry - sl) < min_dist:
         sl = entry - min_dist if direction is Direction.BULLISH else entry + min_dist
@@ -1044,7 +1055,11 @@ def compute_tp1(a: CanonicalAsset, entry: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = _get_opposite_zone(a, direction)
     if opp:
-        return opp.level, (round(abs(opp.level - entry) / atr, 2) if atr > 0 else None), False
+        dist_atr = abs(opp.level - entry) / atr if atr > 0 else float("inf")
+        if dist_atr <= cfg.TP_MAX_ATR_MULT:
+            # Zone opposée proche et réaliste → l'utiliser comme TP1
+            return opp.level, round(dist_atr, 2), False
+        # Zone opposée trop loin → la réserver pour TP2, utiliser synthétique pour TP1
     tp1 = entry + cfg.TP1_ATR_MULT * atr if direction is Direction.BULLISH else entry - cfg.TP1_ATR_MULT * atr
     return tp1, cfg.TP1_ATR_MULT, True
 
@@ -1054,9 +1069,13 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = [z for z in sorted(a.zones, key=lambda z: z.distance_pct)
            if _is_opposite(z, direction)]
-    if len(opp) >= 2:
-        lvl = opp[1].level
-        return lvl, (round(abs(lvl - entry) / atr, 2) if atr > 0 else None), False
+    # Chercher une zone opposée lointaine (> TP_MAX_ATR_MULT) pour TP2
+    for z in opp:
+        dist_atr = abs(z.level - entry) / atr if atr > 0 else float("inf")
+        if dist_atr > cfg.TP_MAX_ATR_MULT:
+            # Zone lointaine = objectif long terme, utiliser comme TP2
+            return z.level, round(dist_atr, 2), False
+    # Pas de zone lointaine → TP2 synthétique conservateur
     tp2 = tp1 + cfg.TP2_ATR_MULT * atr if direction is Direction.BULLISH else tp1 - cfg.TP2_ATR_MULT * atr
     return tp2, (round(abs(tp2 - entry) / atr, 2) if atr > 0 else None), True
 
@@ -1900,7 +1919,12 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         elif calendar.proximity:
             risk = "Medium"
     theme_str = ", ".join(f"{k} {v}" for k, v in (themes.strong.items() if themes else []))
-    sr_degraded = all(s.rr_synthetic for s in setups) if setups else False
+    # Évaluation granulaire de la qualité SR (pas binaire)
+    sr_entry_zone = sum(1 for s in setups if s.entry_type == "Limit")
+    sr_tp1_zone = sum(1 for s in setups if not s.rr_synthetic)
+    sr_tp2_zone = sum(1 for s in setups if s.tp2 and not s.rr_synthetic)
+    # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
+    sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
     return _get_template().render(
         date_hdr=clock.date_hdr,
         n_setups=len(setups),
