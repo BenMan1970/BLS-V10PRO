@@ -1393,6 +1393,12 @@ def run_pipeline(
     calendar_data = load_calendar(calendar_json_path)
     clock = Clock.from_meta(meta.generated_at)
 
+    # Auto-nommage si pas de chemin explicite
+    if output_path is None:
+        output_path = report_filename(meta.generated_at, "html")
+    if pdf_path is None:
+        pdf_path = report_filename(meta.generated_at, "pdf")
+
     # 2 — calendar buckets
     cal_sets = calendar_data.bucket(clock.now_utc)
 
@@ -1509,6 +1515,14 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
+def report_filename(generated_at: datetime, ext: str) -> str:
+    """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    local = generated_at.astimezone(timezone(timedelta(hours=1)))
+    return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
+
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 16 — RENDER  (template calibré + média print A4 — RENDU CORRIGÉ v10.2)
@@ -1538,7 +1552,7 @@ _INLINE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BLUESTAR FX CASCADE – {{date_hdr}}</title>
+<title>BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
 :root{
@@ -1780,12 +1794,25 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
 .sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
 .sus-item-txt{font-size:9px;color:var(--muted)}
-#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
+#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999;display:flex;gap:8px}
 #pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 </style>
 </head>
 <body>
-<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
+<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button><button onclick="downloadHtml()">Télécharger HTML</button></div>
+<script>
+function downloadHtml(){
+  const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
+  const blob=new Blob([html],{type:'text/html'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.html";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+</script>
 <div id="page">
 <div class="page-header">
   <div class="header-left">
@@ -1925,8 +1952,10 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     sr_tp2_zone = sum(1 for s in setups if s.tp2 and not s.rr_synthetic)
     # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
     sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
+    date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
     return _get_template().render(
         date_hdr=clock.date_hdr,
+        date_hdr_file=date_hdr_file,
         n_setups=len(setups),
         n_passed=n_passed,
         n_total=meta.assets_count or (n_passed + len(eliminated)),
