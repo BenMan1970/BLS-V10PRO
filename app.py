@@ -82,7 +82,6 @@ with col2:
 if merged_file and calendar_file:
     if st.button("▶ Générer le rapport", type="primary", use_container_width=True):
         with st.spinner("Pipeline en cours…"):
-            # Écriture dans des fichiers temporaires (run_pipeline attend des paths)
             with tempfile.TemporaryDirectory() as tmpdir:
                 merged_path = os.path.join(tmpdir, "merged.json")
                 calendar_path = os.path.join(tmpdir, "calendar.json")
@@ -99,43 +98,56 @@ if merged_file and calendar_file:
                         calendar_json_path=calendar_path,
                         output_path=output_path,
                     )
+                    # Stocker dans session_state pour figer le résultat
+                    st.session_state["report_html"] = html
+                    st.session_state["report_pdf"] = None  # généré à la demande
+
+                    if _HAS_WEASYPRINT:
+                        with st.spinner("Génération PDF…"):
+                            try:
+                                st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
+                            except Exception as pdf_err:
+                                st.session_state["report_pdf_err"] = str(pdf_err)
+
                     st.success("✅ Rapport généré")
-
-                    # Affichage inline du HTML
-                    st.components.v1.html(html, height=1800, scrolling=True)
-
-                    # ── Téléchargements ───────────────────────────────
-                    dl_col1, dl_col2 = st.columns(2)
-
-                    with dl_col1:
-                        st.download_button(
-                            label="⬇️ Télécharger le rapport HTML",
-                            data=html,
-                            file_name="bluestar_report.html",
-                            mime="text/html",
-                            use_container_width=True,
-                        )
-
-                    with dl_col2:
-                        if _HAS_WEASYPRINT:
-                            with st.spinner("Génération PDF…"):
-                                try:
-                                    pdf_bytes = _html_to_pdf_bytes(html)
-                                    st.download_button(
-                                        label="⬇️ Télécharger PDF (calibré)",
-                                        data=pdf_bytes,
-                                        file_name="bluestar_report.pdf",
-                                        mime="application/pdf",
-                                        use_container_width=True,
-                                    )
-                                except Exception as pdf_err:
-                                    st.error(f"Erreur PDF : {pdf_err}")
-                        else:
-                            st.info("PDF indisponible — WeasyPrint non installé.")
 
                 except Exception as e:
                     st.error(f"Erreur pipeline : {e}")
                     st.exception(e)
+
+# ── Affichage et téléchargements (depuis session_state — aucun rerun déclenché) ──
+if "report_html" in st.session_state:
+    html = st.session_state["report_html"]
+
+    st.components.v1.html(html, height=1800, scrolling=True)
+
+    dl_col1, dl_col2 = st.columns(2)
+
+    with dl_col1:
+        st.download_button(
+            label="⬇️ Télécharger le rapport HTML",
+            data=html,
+            file_name="bluestar_report.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with dl_col2:
+        if _HAS_WEASYPRINT:
+            pdf_bytes = st.session_state.get("report_pdf")
+            if pdf_bytes:
+                st.download_button(
+                    label="⬇️ Télécharger PDF",
+                    data=pdf_bytes,
+                    file_name="bluestar_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            elif st.session_state.get("report_pdf_err"):
+                st.error(f"Erreur PDF : {st.session_state['report_pdf_err']}")
+        else:
+            st.info("PDF indisponible — WeasyPrint non installé.")
+
 else:
     st.info("⬆️ Upload les deux fichiers JSON pour lancer le pipeline.")
     st.markdown("""
