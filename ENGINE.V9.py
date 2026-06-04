@@ -1784,7 +1784,6 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
   .footer{display:none!important}
-  #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
@@ -1794,12 +1793,10 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
 .sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
 .sus-item-txt{font-size:9px;color:var(--muted)}
-#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999;display:flex;gap:8px}
-#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
+
 </style>
 </head>
 <body>
-<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button><button onclick="downloadHtml()">Télécharger HTML</button></div>
 <script>
 function downloadHtml(){
   const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
