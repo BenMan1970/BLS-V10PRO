@@ -8,3 +8,4 @@ libharfbuzz0b
 libfontconfig1
 shared-mime-info
 fonts-dejavu-core
+libjpeg62-turbo          
