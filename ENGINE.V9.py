@@ -1466,7 +1466,11 @@ def run_pipeline(
             f.write(html)
     # 12b — render (PDF natif calibré) — optionnel, jamais bloquant
     if pdf_path:
-        render_pdf(html, pdf_path)
+        # FIX-BUG: passer fallback_html explicitement (régression V10 vs V9 — sans
+        # cet argument, render_pdf logue une erreur et ne produit rien du tout
+        # quand WeasyPrint est absent, alors que le V9 écrivait un repli HTML).
+        _fb = pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf") else pdf_path + ".html"
+        render_pdf(html, pdf_path, fallback_html=_fb)
     return html
 
 
