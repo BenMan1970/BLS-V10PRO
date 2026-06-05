@@ -1,6 +1,6 @@
 """
-BLUESTAR ENGINE v10.2.1 -- Streamlit Interface (Ameliore)
-Compatible ENGINE.V9.py (legacy) et ENGINE.V9_v10.2.1.py (corrige)
+BLUESTAR ENGINE — Streamlit Interface
+Compatible ENGINE_V9.py (moteur actuel du repo)
 """
 import importlib.util
 import sys
@@ -13,7 +13,7 @@ from datetime import datetime
 
 import streamlit as st
 
-# -- WeasyPrint (PDF natif cote serveur) --
+# ── WeasyPrint (PDF natif côté serveur) ──────────────────────────────────────
 try:
     from weasyprint import HTML as _WeasyHTML
     _HAS_WEASYPRINT = True
@@ -22,21 +22,23 @@ except Exception:
 
 
 def _html_to_pdf_bytes(html: str) -> bytes:
-    """Genere un PDF calibre en memoire via WeasyPrint. Retourne les bytes."""
+    """Génère un PDF calibré en mémoire via WeasyPrint. Retourne les bytes."""
     buf = io.BytesIO()
     _WeasyHTML(string=html).write_pdf(buf)
     return buf.getvalue()
 
 
-# -- Import du moteur (cache_resource pour ne pas recharger a chaque interaction) --
+# ── Import du moteur (cache_resource : chargé une seule fois) ────────────────
 @st.cache_resource(show_spinner=False)
 def _load_engine():
     here = Path(__file__).parent
+    # FIX : ENGINE_V9.py en premier (fichier présent dans le repo)
+    # Les autres noms sont conservés comme repli pour compatibilité
     candidates = [
-        "ENGINE.V9_v10.2.1.py",  # version corrigee (prioritaire)
-        "ENGINE.V9.py",          # legacy
-        "ENGINE_V9.py",
-        "bluestar_engine_v9.py",
+        "ENGINE_V9.py",            # fichier actuel du repo  ← prioritaire
+        "ENGINE.V9_v10.2.1.py",    # ancienne convention (repli)
+        "ENGINE.V9.py",            # legacy (repli)
+        "bluestar_engine_v9.py",   # legacy (repli)
     ]
     for name in candidates:
         path = here / name
@@ -51,44 +53,45 @@ def _load_engine():
 
 _engine_mod, _engine_name = _load_engine()
 
-# -- Config page --
+# ── Config page ──────────────────────────────────────────────────────────────
+# FIX : page_icon="blue_circle" est invalide → remplacé par l'emoji ⭐
 st.set_page_config(
-    page_title="BLUESTAR v10.2.1",
-    page_icon="blue_circle",
+    page_title="BLUESTAR",
+    page_icon="⭐",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# -- Sidebar --
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### BLUESTAR SYSTEM")
-    st.caption("FX Institutional Desk - v10 HYBRID V4")
+    st.caption("FX Institutional Desk — v10 HYBRID V4")
 
     if _engine_mod is None:
         st.error("Moteur introuvable")
     else:
-        st.success(f"Moteur charge : {_engine_name}")
+        st.success(f"Moteur chargé : {_engine_name}")
 
     st.divider()
 
     if _HAS_WEASYPRINT:
-        st.success("WeasyPrint actif -- PDF natif disponible")
+        st.success("WeasyPrint actif — PDF natif disponible")
     else:
-        st.warning("WeasyPrint indisponible -- PDF en fallback HTML")
-        st.caption("Ajoute weasyprint dans requirements.txt + libs systeme (cairo, pango)")
+        st.warning("WeasyPrint indisponible — PDF en fallback HTML")
+        st.caption("Vérifie requirements.txt (weasyprint>=61.0) et packages.txt (libpango, libcairo2…)")
 
     st.divider()
     st.markdown("### Pipeline")
     st.markdown("""
-    1. **Merge** -> bluestar_merged_*.json
-    2. **Calendar** -> calendar.json (optionnel)
-    3. **Engine** -> Scoring V4 + HTML/PDF
+    1. **Merge** → bluestar_merged_*.json
+    2. **Calendar** → calendar.json *(optionnel)*
+    3. **Engine** → Scoring V4 + HTML/PDF
     """)
 
     st.divider()
     st.markdown("### Validation")
     st.markdown("""
-    - Version schema >= 3.4.0
+    - Version schéma >= 3.4.0
     - Assets count > 0
     - ATR cascade valide
     """)
@@ -96,20 +99,26 @@ with st.sidebar:
     if st.button("Vider le cache", use_container_width=True):
         st.cache_resource.clear()
         st.cache_data.clear()
-        st.success("Cache vide. Rechargez la page.")
+        st.success("Cache vidé. Rechargez la page.")
 
 
-# -- Header --
-st.title("BLUESTAR ENGINE v10.2.1")
-st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
+# ── Header ───────────────────────────────────────────────────────────────────
+st.title("BLUESTAR ENGINE")
+# FIX : titre cohérent avec le moteur réellement chargé
+if _engine_mod is not None:
+    st.caption(f"FX Institutional Desk — Hybrid Absolute/Cross-Sectional V4 — moteur : {_engine_name}")
+else:
+    st.caption("FX Institutional Desk — Hybrid Absolute/Cross-Sectional V4")
 
 if _engine_mod is None:
-    st.error("Moteur introuvable. Verifie que ENGINE.V9_v10.2.1.py ou ENGINE.V9.py est dans le repo.")
+    st.error(
+        "Moteur introuvable. Vérifie que **ENGINE_V9.py** est présent dans le repo."
+    )
     st.stop()
 
 run_pipeline = _engine_mod.run_pipeline
 
-# -- Upload des fichiers --
+# ── Upload des fichiers ───────────────────────────────────────────────────────
 col1, col2 = st.columns(2)
 
 with col1:
@@ -117,49 +126,47 @@ with col1:
         "Merged JSON (bluestar_merged_*.json)",
         type=["json"],
         key="merged",
-        help="Output du merge pipeline (merge_app.py). Doit contenir meta.version >= 3.4.0",
+        help="Output du merge pipeline. Doit contenir meta.version >= 3.4.0",
     )
 
 with col2:
     calendar_file = st.file_uploader(
-        "Calendar JSON (calendar.json) -- optionnel",
+        "Calendar JSON (calendar.json) — optionnel",
         type=["json"],
         key="calendar",
-        help="Calendrier economique parse. Si absent, le pipeline tourne en mode degrade (F7 MACRO = 1.0, pas de blackout).",
+        help="Calendrier économique parsé. Si absent : F7 MACRO = 1.0, pas de blackout.",
     )
 
-# -- Preview des donnees uploades --
+# ── Aperçu du merged JSON ────────────────────────────────────────────────────
 if merged_file:
-    with st.expander("Apercu du merged JSON", expanded=False):
+    with st.expander("Aperçu du merged JSON", expanded=False):
         try:
             merged_data = json.loads(merged_file.getvalue().decode("utf-8"))
-            meta = merged_data.get("meta", {})
+            meta   = merged_data.get("meta", {})
             assets = merged_data.get("assets", {})
             signals = merged_data.get("signals", [])
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Version", meta.get("version", "N/A"))
-            c2.metric("Assets", len(assets))
-            c3.metric("Signaux", len(signals))
+            c1.metric("Version",  meta.get("version", "N/A"))
+            c2.metric("Assets",   len(assets))
+            c3.metric("Signaux",  len(signals))
             scanners = meta.get("scanners_detected", [])
             c4.metric("Scanners", ", ".join(scanners)[:30] if scanners else "N/A")
 
-            # Validation version schema (FIX-E02)
+            # Validation version schéma
             version = meta.get("version", "")
             if version:
                 try:
                     v_parts = tuple(int(x) for x in version.split(".")[:3])
-                    min_v = (3, 4, 0)
-                    if v_parts < min_v:
-                        st.warning(f"Version schema {version} < 3.4.0 -- risque de desynchronisation merge->engine")
+                    if v_parts < (3, 4, 0):
+                        st.warning(f"Version schéma {version} < 3.4.0 — risque de désynchronisation merge→engine")
                     else:
-                        st.success(f"Version schema {version} compatible")
+                        st.success(f"Version schéma {version} compatible")
                 except (ValueError, AttributeError):
-                    st.warning(f"Version schema non parseable : {version}")
+                    st.warning(f"Version schéma non parseable : {version}")
             else:
-                st.error("Version schema absente -- merge_app.py obsolete ?")
+                st.error("Version schéma absente — merge_app.py obsolète ?")
 
-            # Apercu des assets
             if assets:
                 sample_sym = list(assets.keys())[:5]
                 st.markdown(f"**Assets (top 5) :** {', '.join(sample_sym)}")
@@ -169,17 +176,19 @@ if merged_file:
         except Exception as e:
             st.error(f"Erreur lecture : {e}")
 
-# -- Bouton run --
+# ── Bouton run ────────────────────────────────────────────────────────────────
 run_disabled = merged_file is None
-if st.button("Generer le rapport", type="primary", use_container_width=True, disabled=run_disabled):
+if st.button("Générer le rapport", type="primary", use_container_width=True, disabled=run_disabled):
     if not merged_file:
         st.error("Upload le fichier merged JSON d'abord.")
         st.stop()
 
-    with st.spinner("Pipeline en cours..."):
+    with st.spinner("Pipeline en cours…"):
+        # FIX : output_path=None → l'engine n'écrit pas de fichier HTML parasite
+        # dans le répertoire courant du serveur. Le HTML est récupéré via la
+        # valeur de retour de run_pipeline, ce qui est la bonne approche.
         with tempfile.TemporaryDirectory() as tmpdir:
-            merged_path = os.path.join(tmpdir, "merged.json")
-            output_path = os.path.join(tmpdir, "report.html")
+            merged_path  = os.path.join(tmpdir, "merged.json")
 
             with open(merged_path, "wb") as f:
                 f.write(merged_file.getvalue())
@@ -191,60 +200,59 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                     f.write(calendar_file.getvalue())
 
             try:
-                # Appel du pipeline
-                kwargs = {
-                    "merged_path": merged_path,
-                    "output_path": output_path,
-                }
+                # FIX : output_path retiré des kwargs → pas d'écriture inutile
+                # dans tmpdir (qui sera détruit), pas de fichier parasite dans le repo.
+                # Le HTML est entièrement géré via la valeur de retour.
+                kwargs = {"merged_path": merged_path}
                 if calendar_path:
                     kwargs["calendar_json_path"] = calendar_path
 
                 html = run_pipeline(**kwargs)
 
-                st.session_state["report_html"] = html
-                st.session_state["report_pdf"] = None
+                st.session_state["report_html"]    = html
+                st.session_state["report_pdf"]     = None
                 st.session_state["report_pdf_err"] = None
 
-                # Generation PDF si WeasyPrint dispo
+                # Génération PDF côté serveur via WeasyPrint
                 if _HAS_WEASYPRINT:
-                    with st.spinner("Generation PDF natif..."):
+                    with st.spinner("Génération PDF natif…"):
                         try:
                             st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
                         except Exception as pdf_err:
                             st.session_state["report_pdf_err"] = str(pdf_err)
 
-                st.success("Rapport genere avec succes")
+                st.success("Rapport généré avec succès ✓")
 
             except Exception as e:
                 st.error(f"Erreur pipeline : {e}")
                 st.exception(e)
                 st.stop()
 
-# -- Affichage et telechargements --
+# ── Affichage et téléchargements ─────────────────────────────────────────────
 if "report_html" in st.session_state:
     html = st.session_state["report_html"]
 
-    # Onglets : Preview | Source
-    tab_preview, tab_source = st.tabs(["Apercu", "Source HTML"])
+    tab_preview, tab_source = st.tabs(["Aperçu", "Source HTML"])
 
     with tab_preview:
-        st.components.v1.html(html, height=1800, scrolling=True)
+        # FIX : height dynamique basé sur la taille du HTML
+        # ~2800px couvre jusqu'à 5 setups + section éliminés confortablement
+        preview_height = min(max(len(html) // 8, 2000), 4000)
+        st.components.v1.html(html, height=preview_height, scrolling=True)
 
     with tab_source:
         preview = html[:5000]
         if len(html) > 5000:
-            preview += "\n... (truncated)"
+            preview += "\n… (tronqué)"
         st.code(preview, language="html")
 
-    # Telechargements
     st.divider()
     dl_col1, dl_col2, dl_col3 = st.columns(3)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
     with dl_col1:
         st.download_button(
-            label="HTML",
+            label="⬇ HTML",
             data=html,
             file_name=f"bluestar_report_{timestamp}.html",
             mime="text/html",
@@ -254,7 +262,7 @@ if "report_html" in st.session_state:
     with dl_col2:
         if _HAS_WEASYPRINT and st.session_state.get("report_pdf"):
             st.download_button(
-                label="PDF natif",
+                label="⬇ PDF natif",
                 data=st.session_state["report_pdf"],
                 file_name=f"bluestar_report_{timestamp}.pdf",
                 mime="application/pdf",
@@ -263,30 +271,28 @@ if "report_html" in st.session_state:
         else:
             st.button("PDF natif", disabled=True, use_container_width=True)
             if st.session_state.get("report_pdf_err"):
-                err = st.session_state["report_pdf_err"]
-                st.error(f"PDF err : {err[:100]}")
+                st.error(f"PDF err : {st.session_state['report_pdf_err'][:120]}")
 
     with dl_col3:
-        # Fallback : sauvegarder le HTML avec extension .pdf.html
         st.download_button(
-            label="HTML (fallback PDF)",
+            label="⬇ HTML → PDF (fallback)",
             data=html,
             file_name=f"bluestar_report_{timestamp}.pdf.html",
             mime="text/html",
             use_container_width=True,
-            help="Ouvrez ce fichier dans Chrome -> Ctrl+P -> Enregistrer en PDF. Meme CSS @page que le PDF natif.",
+            help="Ouvrir dans Chrome → Ctrl+P → Enregistrer en PDF. Même CSS @page que le PDF natif.",
         )
 
 else:
     st.info("Upload le fichier merged JSON pour lancer le pipeline.")
     st.markdown("""
     **Fichiers requis :**
-    - bluestar_merged_YYYYMMDD_HHMMutc.json -- output du merge engine (v3.4.3+)
+    - `bluestar_merged_YYYYMMDD_HHMMutc.json` — output du merge engine (v3.4.3+)
 
     **Fichiers optionnels :**
-    - calendar.json -- calendrier economique parse (Forex Factory)
+    - `calendar.json` — calendrier économique parsé (Forex Factory)
 
     **Notes :**
-    - Sans calendrier, le pipeline tourne en mode degrade : F7 MACRO = 1.0, pas de blackout.
-    - WeasyPrint est requis pour le PDF natif. Sinon, utilisez le fallback HTML + impression navigateur.
+    - Sans calendrier, F7 MACRO = 1.0 partout, aucun blackout appliqué.
+    - WeasyPrint ≥ 61.0 est requis pour le PDF natif (CSS custom properties + grid).
     """)
