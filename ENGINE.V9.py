@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import math
@@ -2001,7 +2002,11 @@ def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
         return fallback_html
     if base_url is None:
         base_url = os.getcwd()
-    _WeasyHTML(string=html, base_url=base_url).write_pdf(pdf_path)
+    # FIX-W61 : BytesIO intermédiaire pour compatibilité WeasyPrint 61+ (pydyf)
+    buf = io.BytesIO()
+    _WeasyHTML(string=html, base_url=base_url).write_pdf(buf)
+    with open(pdf_path, "wb") as f:
+        f.write(buf.getvalue())
     logger.info("PDF natif calibré généré: %s", pdf_path)
     return pdf_path
 
