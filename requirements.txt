@@ -1,5 +1,15 @@
+# BLUESTAR ENGINE v10 — requirements corrigés
+# Correction principale : weasyprint>=61.0 (support CSS custom properties + display:grid)
+# weasyprint 60.2 ignorait toutes les var(--*) et display:grid → PDF visuellement cassé
+
 pydantic>=2.0,<3.0
 jinja2>=3.1,<4.0
 streamlit>=1.35,<2.0
-weasyprint==60.2
-pydyf==0.10.0
+
+# WeasyPrint : MINIMUM 61.0 requis pour CSS custom properties (var(--*)) et display:grid
+# La version 60.2 ne supporte ni l'un ni l'autre → layout PDF entièrement cassé
+weasyprint>=61.0,<70.0
+
+# pydyf : suivre weasyprint (0.11+ pour CSS vars, 0.12+ pour WeasyPrint 69)
+# Ne pas épingler à 0.10.0 — laisser weasyprint résoudre la dépendance
+# pydyf==0.10.0  <-- SUPPRIMER cette ligne
