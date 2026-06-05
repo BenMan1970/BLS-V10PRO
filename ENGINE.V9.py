@@ -45,11 +45,7 @@ logger = logging.getLogger("bluestar.v10")
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
-try:  # pragma: no cover
-    from merge_appbackup import Direction as _UpstreamDirection  # noqa: F401
-    _HAS_UPSTREAM = True
-except Exception:
-    _HAS_UPSTREAM = False
+# FIX-E01: import merge_appbackup supprimé (module inexistant, _HAS_UPSTREAM inutilisé)
 
 # Optional PDF backend — native, calibrated rendering. Never blocking at import.
 try:  # pragma: no cover
@@ -1083,8 +1079,8 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
 def compute_rr(entry: float, sl: float, tp1: float, tp2: Optional[float],
                tp1_syn: bool, tp2_syn: bool) -> tuple[float, str]:
     risk = abs(entry - sl)
-    if risk <= 0:
-        return 0.0, "Risk=0, invalid"
+    if risk <= 0 or math.isclose(risk, 0.0, abs_tol=1e-12):
+        return 0.0, "Risk ~0, invalid"
     r1 = abs(tp1 - entry)
     if tp2 is None:
         rr = r1 / risk
@@ -1321,7 +1317,9 @@ def _htf_aligned(a: CanonicalAsset) -> bool:
 
 
 def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
-               flags: list[Flag], lv: LevelBundle) -> str:
+               flags: list[Flag], lv: Optional[LevelBundle] = None) -> str:
+    if lv is None:
+        lv = build_levels(a)
     parts = [f"Score absolu {fv.absolute_mean:.2f}"]
     top = sorted(fv.present, key=lambda n: -fv.get(n))[:3]
     parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}" for n in top))
@@ -1338,8 +1336,10 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
 
 
 def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
-                cal: Optional[CalendarSets], cfg: V4Config) -> SetupV4:
-    lv = build_levels(a, cfg)
+                cal: Optional[CalendarSets], cfg: V4Config,
+                lv: Optional[LevelBundle] = None) -> SetupV4:
+    if lv is None:
+        lv = build_levels(a, cfg)
     cal_status, cal_note = _compute_cal_status(a, cal)
     fs = FactorScores(
         f1_hwa=round(fv.get("f1_hwa"), 4),
@@ -1411,10 +1411,13 @@ def run_pipeline(
     # 5 — factor vectors + drafts (levels)
     vectors: list[FactorVector] = []
     drafts: list[SetupV4] = []
+    lv_cache: dict[str, LevelBundle] = {}
     for a in universe.passed:
         fv = build_factor_vector(a, themes, cal_sets, clock, config)
         vectors.append(fv)
-        drafts.append(_make_draft(a, fv, themes, cal_sets, config))
+        lv = build_levels(a, config)
+        lv_cache[a.symbol] = lv
+        drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
 
     # 6 — cross-section quantiles (tie-break/diversif only)
     quantiles = compute_quantiles(vectors)
@@ -1433,7 +1436,7 @@ def run_pipeline(
         if cap_reason:
             s.capped_reason = cap_reason
         s.conviction = grade(fv.absolute_mean, flags, cap, config)
-        s.rationale = _rationale(a, fv, themes, flags, build_levels(a, config))
+        s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
 
     # 8 — preflight (before rank)
     for s in drafts:
@@ -1497,6 +1500,18 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
+    # FIX-E02: vérification version schéma merge
+    if meta.version:
+        try:
+            min_version = "3.4.0"
+            meta_v = tuple(int(x) for x in meta.version.split(".")[:3])
+            min_v = tuple(int(x) for x in min_version.split(".")[:3])
+            if meta_v < min_v:
+                logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)", meta.version, min_version)
+        except (ValueError, AttributeError):
+            logger.warning("Version schéma non parseable: %s", meta.version)
+    else:
+        logger.warning("Version schéma absente dans le merge")
     assets: dict[str, CanonicalAsset] = {}
     for sym, a in (raw.get("assets") or {}).items():
         try:
@@ -1962,25 +1977,24 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     )
 
 
-def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None) -> str:
+def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
+               fallback_html: Optional[str] = None) -> str:
     """Génère un PDF natif CALIBRÉ depuis le HTML via WeasyPrint.
 
     WeasyPrint applique le bloc @page + @media print du template (A4, marges
     uniformes, en-tête/pied paginés, anti-coupure des cartes), produisant un
     document proportionnel et professionnel — sans dépendre du print() navigateur.
 
-    Repli sûr : si WeasyPrint n'est pas installé, on écrit le HTML calibré et on
-    informe l'utilisateur d'utiliser le bouton "Télécharger PDF" (qui applique le
-    même CSS @page). Jamais bloquant.
+    Repli sûr : si WeasyPrint n'est pas installé, passez fallback_html pour
+    écrire un repli HTML explicite. Jamais bloquant.
     """
     if not _HAS_WEASYPRINT:
-        logger.warning(
-            "WeasyPrint indisponible — PDF non généré. "
-            "Installez-le (`pip install weasyprint`) pour un PDF natif calibré, "
-            "ou utilisez le bouton « Télécharger PDF » du HTML (même CSS @page).")
-        fallback_html = pdf_path
-        if fallback_html.lower().endswith(".pdf"):
-            fallback_html = fallback_html[:-4] + ".html"
+        if fallback_html is None:
+            logger.error(
+                "WeasyPrint indisponible — PDF non généré. "
+                "Installez-le (`pip install weasyprint`) ou passez fallback_html=... "
+                "pour un repli HTML explicite.")
+            return pdf_path
         with open(fallback_html, "w", encoding="utf-8") as f:
             f.write(html)
         logger.info("HTML calibré écrit en repli: %s", fallback_html)
