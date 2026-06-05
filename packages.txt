@@ -7,5 +7,4 @@ libcairo-gobject2
 libharfbuzz0b
 libfontconfig1
 shared-mime-info
-libffi7
 fonts-dejavu-core
