@@ -1713,24 +1713,31 @@ tbody td{padding:5px 10px;vertical-align:middle}
   body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
 
-  /* ── EN-TÊTE : full-bleed, compact, dans le flux normal ── */
+  /* ── EN-TÊTE : ultra-compact en print pour tenir en haut de page 1 ── */
   .page-top{break-inside:avoid!important;break-after:avoid!important}
   .page-header{
     border-radius:0!important;box-shadow:none!important;
-    padding:5px 10mm!important;
+    padding:3px 10mm!important;min-height:0!important;
     border-left:none!important;border-right:none!important;border-top:none!important;
     border-bottom:1px solid var(--border)!important;
   }
   .page-header::after{display:none!important}
-  .sys-name{font-size:13px!important}
-  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:5.5pt!important}
-  .logo-marker{width:20px!important;height:20px!important}
+  .header-left{gap:6px!important}
+  .sys-name{font-size:10px!important;line-height:1!important}
+  .sys-label{font-size:5pt!important;letter-spacing:.1em!important}
+  .sys-desc{font-size:5pt!important;margin-top:0!important}
+  .briefing-label{font-size:5pt!important}
+  .briefing-sub{font-size:5pt!important;margin-top:1px!important}
+  .logo-marker{width:16px!important;height:16px!important;padding:1px!important}
+  .logo-marker svg{width:14px!important;height:14px!important}
+  .header-right{padding-left:8px!important}
   .page-subbar{
-    padding:3px 10mm!important;gap:8px!important;font-size:6pt!important;
+    padding:2px 10mm!important;gap:6px!important;font-size:5.5pt!important;
     border-left:none!important;border-right:none!important;
     border-bottom:1px solid var(--border)!important;
   }
-  .wrap{padding:5mm 10mm 8mm 10mm!important}
+  .confidential{font-size:5pt!important;padding:1px 6px!important}
+  .wrap{padding:4mm 10mm 8mm 10mm!important}
 
   /* ── SECTION ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
@@ -1740,10 +1747,16 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sec-ttl{font-size:8pt!important}
   .sec-sub{font-size:7pt!important}
 
-  /* ── SETUP CARD ── */
+  /* ── SETUP CARD : autoriser la fragmentation si trop grand, mais garder hdr+premier bloc solidaires ── */
   .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
-         break-inside:avoid!important;page-break-inside:avoid!important}
-  .setup-hdr{padding:5px 10px!important;gap:6px!important;break-after:avoid!important;page-break-after:avoid!important}
+         break-inside:auto!important;page-break-inside:auto!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important;
+             break-before:avoid!important;page-break-before:avoid!important;
+             break-after:avoid!important;page-break-after:avoid!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
+  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+               break-before:avoid!important;page-break-before:avoid!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
   .setup-body{padding:6px 10px!important}
   .pair{font-size:12.5px!important}
   .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
@@ -1751,7 +1764,6 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .cluster-tag{font-size:7pt!important}
 
   /* ── GRILLES ── */
-  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .factor-val{font-size:9pt!important}
   .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
@@ -1792,7 +1804,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .reject-code{font-size:7pt!important}
 
   /* ── DIVERS ── */
-  .print-ctx-bar{display:block!important;font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;color:var(--sec)!important;background:var(--card)!important;border:1px solid var(--border)!important;border-radius:4px!important;padding:3px 10px!important;margin-bottom:6px!important;letter-spacing:.04em!important;break-inside:avoid!important;break-after:avoid!important}
+  .print-ctx-bar{display:none!important}
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
   .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .sus-item-pair{font-size:8pt!important}
