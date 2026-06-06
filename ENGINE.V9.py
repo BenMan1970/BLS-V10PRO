@@ -1702,168 +1702,114 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .briefing-sub{font-size:8.5px;color:var(--sec);font-family:var(--mono);margin-top:4px;letter-spacing:.02em}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
-/* page-top : wrapper header+subbar — neutre écran, contrôle de rupture en print */
-.page-top{display:block}
-/* page-running :
-   - WeasyPrint lit position:running() dans le CSS global → sort le bloc du flux PDF
-   - @media screen override → position:static pour les navigateurs (rendu normal) */
-.page-running{position:running(pageheader)}
-@media screen{.page-running{position:static!important}}
+/* ═══════════════ PDF / PRINT — RENDU DIRECT VIA HTML (v10.3) ═══════════════
+   Stratégie : le HTML est la source de vérité. Pas de running header bugué.
+   - Header riche uniquement sur page 1 (dans le flux normal)
+   - Marges @page uniformes et raisonnables (10mm)
+   - Footer répété via @bottom-center (texte simple, jamais bugué)
+   - break-inside:avoid sur les cartes pour éviter les coupures
+   - Pas de position:running(), pas d'element(), pas de margin:0 */
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.3) ═══════════════
-   Stratégie zero-border définitive :
-   - @page margin:0 → zéro bande blanche périphérique garantie
-   - html + body + #page background = var(--bg) → fond coloré jusqu'aux bords physiques
-   - .page-header / .page-subbar hors .wrap → full-bleed natif, pas de décalage
-   - .wrap padding interne = respiration du contenu sans bande blanche
-   - zoom:1 → WeasyPrint ne crée pas d'artefact de scaling
-   - position:running(pageheader) → mécanisme natif WeasyPrint pour en-tête répété chaque page
-   - @page margin-top calibré pour accueillir le slot header (22mm) */
-
-/* Marge top pour le slot running header ; autres bords à 0 */
-@page{
-  size:A4 portrait;
-  margin:22mm 0 0 0;
-  @top-left{
-    content:element(pageheader);
-    vertical-align:top;
-  }
-}
-@page:first{
-  margin:22mm 0 0 0;
-  @top-left{
-    content:element(pageheader);
-    vertical-align:top;
+@page {
+  size: A4 portrait;
+  margin: 10mm 10mm 12mm 10mm;
+  @bottom-center {
+    content: "CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}]";
+    font-family: 'IBM Plex Mono', 'SF Mono', 'Courier New', monospace;
+    font-size: 6pt;
+    color: #6B89D8;
+    letter-spacing: 0.2px;
   }
 }
 
-@media print{
-  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
-  body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
-  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
-  .wrap{padding:4mm 10mm 8mm 10mm!important}
+@media print {
+  * {-webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;}
+  html {background: #f5f7fc !important;}
+  body {background: #f5f7fc !important; font-size: 8pt !important; line-height: 1.35 !important; color: #1a1a2e !important;}
+  #page {max-width: none !important; margin: 0 !important; padding: 0 !important; background: #f5f7fc !important;}
+  .wrap {padding: 0 !important;}
 
-  /* ── RUNNING HEADER : wrapper déjà sorti du flux via CSS global (.page-running) ── */
-  .page-top{display:block!important}
-  .page-running{
-    width:210mm!important;
-    background:var(--bg)!important;
-  }
-  .page-header{
-    display:flex!important;
-    position:static!important;
-    border-radius:0!important;box-shadow:none!important;
-    padding:4px 10mm!important;
-    border-left:none!important;border-right:none!important;border-top:none!important;
-    background:linear-gradient(135deg,#F8FAFF 0%,#F0F4FE 100%)!important;
-    border-bottom:1px solid var(--border)!important;
-  }
-  .sys-name{font-size:12px!important}
-  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:5.5pt!important}
-  .logo-marker{width:20px!important;height:20px!important}
-  .page-subbar{
-    display:flex!important;
-    position:static!important;
-    box-shadow:none!important;padding:2px 10mm!important;gap:8px!important;font-size:6pt!important;
-    border-left:none!important;border-right:none!important;
-    background:rgba(27,69,180,.04)!important;
-    border-bottom:1px solid var(--border)!important;
-  }
+  /* Header page 1 (flux normal) — compacté mais fidèle */
+  .page-top {margin-bottom: 6px !important;}
+  .page-header {padding: 6px 0 !important; border-radius: 4px 4px 0 0 !important; box-shadow: none !important; border-bottom: 1px solid #dde3f5 !important;}
+  .sys-name {font-size: 13pt !important;}
+  .sys-label, .sys-desc {font-size: 6.5pt !important;}
+  .briefing-label, .briefing-sub {font-size: 6.5pt !important;}
+  .logo-marker {width: 22px !important; height: 22px !important;}
+  .logo-marker svg {width: 18px !important; height: 18px !important;}
+  .page-subbar {padding: 3px 0 !important; font-size: 6.5pt !important; gap: 10px !important; border-radius: 0 0 4px 4px !important;}
+  .confidential {font-size: 6pt !important; padding: 1px 6px !important;}
 
-  /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
-  .sec-body{overflow:visible!important;padding:7px 6px!important}
-  .sec-hdr{padding:5px 10px!important;border:1px solid var(--border)!important;border-radius:4px!important;
-           break-after:avoid!important;page-break-after:avoid!important}
-  .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
-  .sec-ttl{font-size:8pt!important}
-  .sec-sub{font-size:7pt!important}
+  /* Sections et cartes — anti-coupure, pas d'overflow caché */
+  .section {overflow: visible !important; box-shadow: none !important; margin-bottom: 6px !important; border: 1px solid #dde3f5 !important;}
+  .sec-hdr {padding: 4px 8px !important; break-after: avoid !important; page-break-after: avoid !important;}
+  .sec-num {width: 16px !important; height: 16px !important; font-size: 7pt !important;}
+  .sec-ttl {font-size: 8pt !important;}
+  .sec-sub {font-size: 6.5pt !important;}
+  .sec-body {padding: 5px 8px !important;}
 
-  /* ── SETUP CARD : entière, jamais coupée, AUCUN saut forcé ── */
-  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
-         break-inside:avoid!important;page-break-inside:avoid!important}
-  .setup-hdr{padding:5px 10px!important;gap:6px!important;break-after:avoid!important;page-break-after:avoid!important}
-  .setup-body{padding:6px 10px!important}
-  .pair{font-size:12.5px!important}
-  .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
-  .scen-lbl{font-size:7pt!important}
-  .cluster-tag{font-size:7pt!important}
+  .setup {overflow: visible !important; box-shadow: none !important; margin-bottom: 5px !important; break-inside: avoid !important; page-break-inside: avoid !important; border: 1px solid #dde3f5 !important;}
+  .setup-hdr {padding: 4px 8px !important; gap: 6px !important; break-after: avoid !important; page-break-after: avoid !important;}
+  .setup-body {padding: 5px 8px !important;}
+  .pair {font-size: 12pt !important;}
+  .dir, .conv {font-size: 7pt !important; padding: 1px 5px !important;}
+  .scen-lbl {font-size: 6.5pt !important;}
+  .cluster-tag {font-size: 6.5pt !important;}
 
-  /* ── GRILLES FACTEURS / MÉTRIQUES : solidaires de leur carte ── */
-  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
-  .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
-  .factor-val{font-size:9pt!important}
-  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
-                break-inside:avoid!important;page-break-inside:avoid!important}
-  .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
-  .metric-val{font-size:9pt!important}
+  /* Grilles — solidaires de leur carte */
+  .factor-grid {padding: 3px 5px !important; gap: 3px !important; margin-bottom: 4px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .factor-lbl {font-size: 5.5pt !important; margin-bottom: 1px !important;}
+  .factor-val {font-size: 9pt !important;}
+  .metrics-grid {padding: 3px 5px !important; gap: 3px !important; margin-bottom: 4px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .metric-lbl {font-size: 5.5pt !important; margin-bottom: 1px !important;}
+  .metric-val {font-size: 9pt !important;}
 
-  /* ── GRILLE PRIX ── */
-  .px-grid{gap:4px!important;margin-bottom:5px!important;
-           break-inside:avoid!important;page-break-inside:avoid!important}
-  .px-card{padding:4px 7px!important}
-  .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
-  .px-val{font-size:10.5pt!important}
-  .px-sub{font-size:6.5pt!important;margin-top:1px!important}
+  .px-grid {gap: 4px !important; margin-bottom: 4px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .px-card {padding: 3px 6px !important;}
+  .px-lbl {font-size: 5.5pt !important; margin-bottom: 1px !important;}
+  .px-val {font-size: 10pt !important;}
+  .px-sub {font-size: 6pt !important; margin-top: 1px !important;}
 
-  /* ── RATIONALE & AUDIT : compacts, solidaires ── */
-  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;
-             break-inside:avoid!important;page-break-inside:avoid!important}
-  .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
-  .flags-row{gap:4px!important;margin-bottom:5px!important;
-             break-inside:avoid!important;page-break-inside:avoid!important}
-  .flag{font-size:6.5pt!important;padding:1px 5px!important}
-  .cap-note{font-size:6.5pt!important;margin-bottom:4px!important}
-  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
-           break-inside:avoid!important;page-break-inside:avoid!important}
-  .cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{font-size:6.5pt!important;padding:1px 5px!important}
-  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;
-               line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
-  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
-  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;
-          break-inside:avoid!important;page-break-inside:avoid!important}
+  .rationale {padding: 4px 7px !important; margin-bottom: 4px !important; font-size: 7pt !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .rationale strong {font-size: 5.5pt !important; margin-bottom: 1px !important;}
+  .flags-row {gap: 3px !important; margin-bottom: 4px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .flag {font-size: 6pt !important; padding: 1px 4px !important;}
+  .cap-note {font-size: 6pt !important; margin-bottom: 3px !important;}
+  .cal-row {font-size: 6.5pt !important; margin-bottom: 4px !important; gap: 4px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .cal-ok, .cal-prox, .cal-proximity, .cal-blackout, .cal-watch {font-size: 6pt !important; padding: 1px 4px !important;}
+  .audit-block {padding: 4px 7px !important; margin-top: 4px !important; font-size: 5.5pt !important; line-height: 1.3 !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .audit-block strong {font-size: 5.5pt !important; margin-bottom: 1px !important;}
+  .banner {padding: 4px 7px !important; margin-bottom: 5px !important; font-size: 6.5pt !important; break-inside: avoid !important; page-break-inside: avoid !important;}
 
-  /* ── SECTION 2 (éliminés) : démarre proprement sur une nouvelle page ── */
-  .section + .section{break-before:page!important;page-break-before:always!important}
-  .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
-  .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
-  .elim-pair{font-size:8pt!important;min-width:60px!important}
-  .elim-txt{font-size:7pt!important}
+  /* Éliminés — nouvelle page propre */
+  .section + .section {break-before: page !important; page-break-before: always !important;}
+  .sub-lbl {font-size: 6.5pt !important; margin: 6px 0 4px 0 !important; break-after: avoid !important; page-break-after: avoid !important;}
+  .elim {padding: 4px 7px !important; margin-bottom: 3px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .elim-pair {font-size: 7.5pt !important; min-width: 55px !important;}
+  .elim-txt {font-size: 6pt !important;}
 
-  /* ── TABLE des rejets : en-tête répété, lignes insécables ── */
-  table{font-size:7pt!important}
-  thead th{padding:4px 7px!important;font-size:6.5pt!important}
-  tbody td{padding:3px 7px!important}
-  tr,thead{break-inside:avoid!important;page-break-inside:avoid!important}
-  thead{display:table-header-group!important}
-  tfoot{display:table-footer-group!important}
-  .reject-code{font-size:7pt!important}
+  /* Table */
+  table {font-size: 6.5pt !important;}
+  thead th {padding: 3px 6px !important; font-size: 5.5pt !important;}
+  tbody td {padding: 2px 6px !important;}
+  tr, thead {break-inside: avoid !important; page-break-inside: avoid !important;}
+  thead {display: table-header-group !important;}
+  .reject-code {font-size: 6pt !important;}
 
-  /* ── BANDEAU CONTEXTE PRINT : repère de cadrage UNIQUE (sous sec-hdr §1) ── */
-  .print-ctx-bar{
-    display:block!important;
-    font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
-    color:var(--sec)!important;background:var(--card)!important;
-    border:1px solid var(--border)!important;border-radius:4px!important;
-    padding:3px 10px!important;margin-bottom:6px!important;
-    letter-spacing:.04em!important;
-    break-inside:avoid!important;page-break-inside:avoid!important;
-    break-after:avoid!important;page-break-after:avoid!important;
-  }
-  /* Blackout grid compact en print */
-  .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
-  .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
-  .sus-item-pair{font-size:8pt!important}
-  .sus-item-txt{font-size:6.5pt!important}
-  p,li{orphans:3;widows:3}
-  /* Footer HTML maintenu en PDF — letter-spacing:0 obligatoire à 6pt sinon espacement absurde */
-  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
-  a[href]:after{content:""!important}
+  /* Blackout grid */
+  .sus-grid {grid-template-columns: repeat(3, 1fr) !important; gap: 3px !important;}
+  .sus-item {padding: 3px 6px !important; break-inside: avoid !important; page-break-inside: avoid !important;}
+  .sus-item-pair {font-size: 7pt !important;}
+  .sus-item-txt {font-size: 5.5pt !important;}
+
+  /* Footer HTML masqué (remplacé par @bottom-center natif) */
+  .footer {display: none !important;}
+  .print-ctx-bar {display: none !important;}
+
+  p, li {orphans: 3; widows: 3;}
+  a[href]:after {content: "" !important;}
 }
-/* Context bar : masqué écran, repère contextuel print page 1 uniquement */
-.print-ctx-bar{display:none}
+.print-ctx-bar {display: none;}
 /* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
@@ -1888,7 +1834,6 @@ function downloadHtml(){
 </script>
 <div id="page">
 <div class="page-top">
-<div class="page-running">
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
@@ -1904,7 +1849,6 @@ function downloadHtml(){
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
-</div><!-- /.page-running -->
 </div><!-- /.page-top -->
 <div class="wrap">
 
