@@ -1682,7 +1682,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
    n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
 @page{
   size:A4 portrait;
-  margin:5mm 5mm 6mm 5mm;
+  margin:5mm 5mm 5mm 5mm;
   @top-center{
     content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
     font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
@@ -1697,7 +1697,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   }
 }
 /* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
-@page:first{ @top-center{content:""} }
+@page:first{ margin-top:0; @top-center{content:""} }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
@@ -1708,7 +1708,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .wrap{padding:0!important}
 
   /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
-  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:7px 12px!important;
+  .page-header{border-radius:0!important;box-shadow:none!important;padding:7px 12px!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
   .sys-name{font-size:15px!important}
   .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
@@ -1717,7 +1717,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
                break-inside:avoid!important;page-break-inside:avoid!important}
 
   /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:none!important}
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
   .sec-body{overflow:visible!important;padding:7px 6px!important}
   .sec-hdr{padding:5px 10px!important;border:1px solid var(--border)!important;border-radius:4px!important;
            break-after:avoid!important;page-break-after:avoid!important}
