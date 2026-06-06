@@ -50,9 +50,9 @@ logger = logging.getLogger("bluestar.v10")
 
 # Optional PDF backend — native, calibrated rendering. Never blocking at import.
 try:  # pragma: no cover
-    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]
+    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001 — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
     _HAS_WEASYPRINT = False
 
 
@@ -79,7 +79,7 @@ class EventTier(str, Enum):
 
 
 class GateCode(str, Enum):
-    PASS = "PASS"
+    PASS = "PASS"  # nosec B105 — état métier Enum, pas un mot de passe
     G0_SCHEMA_ASSET_ERROR = "SCHEMA_ASSET_ERROR"
     G1_CAL_BLACKOUT = "CAL_BLACKOUT"
     G2_LOW_QUALITY = "LOW_QUALITY"
@@ -135,13 +135,13 @@ def _safe_float(v: Any) -> Optional[float]:
         if v is None:
             return None
         f = float(v)
-        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124 — NaN check
+        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself — NaN check idiom
     except (TypeError, ValueError):
         return None
 
 
 def _clamp01(x: float) -> float:
-    if x != x:  # NaN — noqa: PLR0124
+    if x != x:  # pylint: disable=comparison-with-itself — NaN check idiom
         return 0.0
     return max(0.0, min(1.0, x))
 
@@ -748,7 +748,7 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
-def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001 — cfg reserved for future use
+def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved for future use
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
@@ -762,7 +762,7 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001 — cfg reserved
+def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -837,7 +837,7 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     return out
 
 
-def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001 — cfg reserved
+def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved
     """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
     Quantile NEVER influences conviction; only ordering here. Symbol is the
     final stable secondary key for bit-for-bit reproducibility."""
@@ -997,7 +997,7 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
-def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001 — atr reserved
+def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument — atr reserved
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
@@ -1336,7 +1336,7 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     return " · ".join(parts)
 
 
-def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001 — themes reserved
+def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument — themes reserved
                 cal: Optional[CalendarSets], cfg: V4Config,
                 lv: Optional[LevelBundle] = None) -> SetupV4:
     if lv is None:
@@ -1378,6 +1378,73 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
     )
 
 
+
+def _pipeline_factors_and_grades(
+    universe: Universe,
+    themes: MarketThemes,
+    cal_sets: CalendarSets,
+    clock: Clock,
+    config: V4Config,
+) -> tuple[list[FactorVector], list[SetupV4], dict[str, LevelBundle]]:
+    """Etapes 5-7 : factor vectors, drafts, quantiles, contradictions, grade."""
+    vectors: list[FactorVector] = []
+    drafts: list[SetupV4] = []
+    lv_cache: dict[str, LevelBundle] = {}
+    for a in universe.passed:
+        fv = build_factor_vector(a, themes, cal_sets, clock, config)
+        vectors.append(fv)
+        lv = build_levels(a, config)
+        lv_cache[a.symbol] = lv
+        drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
+    # cross-section quantiles
+    quantiles = compute_quantiles(vectors)
+    for s in drafts:
+        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
+    # contradictions + grade
+    asset_by_sym = {a.symbol: a for a in universe.passed}
+    fv_by_sym = {v.symbol: v for v in vectors}
+    for s in drafts:
+        a = asset_by_sym[s.symbol]
+        fv = fv_by_sym[s.symbol]
+        flags = detect_contradictions(a, fv, themes, cal_sets, config)
+        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
+        cap, cap_reason = apply_caps(a, fv, config)
+        if cap_reason:
+            s.capped_reason = cap_reason
+        s.conviction = grade(fv.absolute_mean, flags, cap, config)
+        s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
+    return vectors, drafts, lv_cache
+
+
+def _pipeline_rank_and_diversify(
+    drafts: list[SetupV4],
+    themes: MarketThemes,
+    config: V4Config,
+) -> tuple[list[SetupV4], list[SetupV4], list[SetupV4]]:
+    """Etapes 8-10 : preflight, rank, diversify. Retourne (final, preflight_rejects, ranked)."""
+    for s in drafts:
+        preflight(s, config)
+    valid = [s for s in drafts if s.reject_code is None]
+    preflight_rejects = [s for s in drafts if s.reject_code is not None]
+    ranked = rank_setups(valid, config)
+    final = diversify(ranked, themes, config)
+    return final, preflight_rejects, ranked
+
+
+def _pipeline_collect_eliminated(
+    universe: Universe,
+    preflight_rejects: list[SetupV4],
+    ranked: list[SetupV4],
+    final: list[SetupV4],
+) -> list[Eliminated]:
+    """Etape 11 : collecte des assets elimines (gates + preflight + non-representants)."""
+    eliminated = _collect_eliminated(universe)
+    eliminated.extend(_eliminated_from_setups(preflight_rejects))
+    final_syms = {s.symbol for s in final}
+    non_reps = [s for s in ranked if s.symbol not in final_syms]
+    eliminated.extend(_eliminated_from_setups(non_reps))
+    return eliminated
+
 def run_pipeline(
     merged_path: str,
     calendar_path: Optional[str] = None,
@@ -1409,54 +1476,17 @@ def run_pipeline(
     # 4 — themes
     themes = detect_currency_themes(assets, config)
 
-    # 5 — factor vectors + drafts (levels)
-    vectors: list[FactorVector] = []
-    drafts: list[SetupV4] = []
-    lv_cache: dict[str, LevelBundle] = {}
-    for a in universe.passed:
-        fv = build_factor_vector(a, themes, cal_sets, clock, config)
-        vectors.append(fv)
-        lv = build_levels(a, config)
-        lv_cache[a.symbol] = lv
-        drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
+    # 5-7 — factor vectors, drafts, grades
+    vectors, drafts, lv_cache = _pipeline_factors_and_grades(
+        universe, themes, cal_sets, clock, config)
 
-    # 6 — cross-section quantiles (tie-break/diversif only)
-    quantiles = compute_quantiles(vectors)
-    for s in drafts:
-        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
-
-    # 7 — contradictions + grade (vetos -> caps -> grid)
-    asset_by_sym = {a.symbol: a for a in universe.passed}
-    fv_by_sym = {v.symbol: v for v in vectors}
-    for s in drafts:
-        a = asset_by_sym[s.symbol]
-        fv = fv_by_sym[s.symbol]
-        flags = detect_contradictions(a, fv, themes, cal_sets, config)
-        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
-        cap, cap_reason = apply_caps(a, fv, config)
-        if cap_reason:
-            s.capped_reason = cap_reason
-        s.conviction = grade(fv.absolute_mean, flags, cap, config)
-        s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
-
-    # 8 — preflight (before rank)
-    for s in drafts:
-        preflight(s, config)
-    valid = [s for s in drafts if s.reject_code is None]
-    preflight_rejects = [s for s in drafts if s.reject_code is not None]
-
-    # 9 — rank (absolute_mean DESC + tie-break)
-    ranked = rank_setups(valid, config)
-
-    # 10 — diversify (cluster -> representative -> cap -> top N)
-    final = diversify(ranked, themes, config)
+    # 8-10 — preflight, rank, diversify
+    final, preflight_rejects, ranked = _pipeline_rank_and_diversify(
+        drafts, themes, config)
 
     # 11 — collect eliminated
-    eliminated = _collect_eliminated(universe)
-    eliminated.extend(_eliminated_from_setups(preflight_rejects))
-    final_syms = {s.symbol for s in final}
-    non_reps = [s for s in ranked if s.symbol not in final_syms]
-    eliminated.extend(_eliminated_from_setups(non_reps))
+    eliminated = _pipeline_collect_eliminated(
+        universe, preflight_rejects, ranked, final)
 
     # 12 — render (HTML)
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
@@ -1521,7 +1551,7 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
     for sym, a in (raw.get("assets") or {}).items():
         try:
             assets[sym] = CanonicalAsset.model_validate(a)
-        except Exception as exc:  # noqa: BLE001 — never blocking, degraded mode
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught — pydantic ValidationError + degraded mode
             logger.warning("asset %s skipped: %s", sym, exc)
     return meta, assets
 
