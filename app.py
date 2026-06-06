@@ -15,9 +15,9 @@ import streamlit as st
 
 # -- WeasyPrint (PDF natif cote serveur) --
 try:
-    from weasyprint import HTML as _WeasyHTML
+    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001 — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
     _HAS_WEASYPRINT = False
 
 
@@ -104,7 +104,10 @@ st.title("BLUESTAR ENGINE v10.2.1")
 st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
 
 if _engine_mod is None:
-    st.error("Moteur introuvable. Verifie que ENGINE.V9_v10.2.1.py ou ENGINE.V9.py est dans le repo.")
+    st.error(
+        "Moteur introuvable. Verifie que ENGINE.V9_v10.2.1.py"
+        " ou ENGINE.V9.py est dans le repo."
+    )
     st.stop()
 
 run_pipeline = _engine_mod.run_pipeline
@@ -125,7 +128,10 @@ with col2:
         "Calendar JSON (calendar.json) -- optionnel",
         type=["json"],
         key="calendar",
-        help="Calendrier economique parse. Si absent, le pipeline tourne en mode degrade (F7 MACRO = 1.0, pas de blackout).",
+        help=(
+            "Calendrier economique parse. Si absent, le pipeline tourne"
+            " en mode degrade (F7 MACRO = 1.0, pas de blackout)."
+        ),
     )
 
 # -- Preview des donnees uploades --
@@ -151,7 +157,10 @@ if merged_file:
                     v_parts = tuple(int(x) for x in version.split(".")[:3])
                     min_v = (3, 4, 0)
                     if v_parts < min_v:
-                        st.warning(f"Version schema {version} < 3.4.0 -- risque de desynchronisation merge->engine")
+                        st.warning(
+                            f"Version schema {version} < 3.4.0"
+                            " -- risque de desynchronisation merge->engine"
+                        )
                     else:
                         st.success(f"Version schema {version} compatible")
                 except (ValueError, AttributeError):
@@ -166,7 +175,7 @@ if merged_file:
 
         except json.JSONDecodeError as e:
             st.error(f"JSON invalide : {e}")
-        except Exception as e:  # noqa: BLE001 — display errors in UI, not fatal
+        except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught — display errors in UI, not fatal
             st.error(f"Erreur lecture : {e}")
 
 # -- Bouton run --
@@ -210,12 +219,12 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                     with st.spinner("Generation PDF natif..."):
                         try:
                             st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
-                        except Exception as pdf_err:  # noqa: BLE001 — PDF errors are non-fatal, shown in UI
+                        except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught — PDF errors are non-fatal, shown in UI
                             st.session_state["report_pdf_err"] = str(pdf_err)
 
                 st.success("Rapport genere avec succes")
 
-            except Exception as e:  # noqa: BLE001 — pipeline errors are surfaced via st.error
+            except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught — pipeline errors are surfaced via st.error
                 st.error(f"Erreur pipeline : {e}")
                 st.exception(e)
                 st.stop()
