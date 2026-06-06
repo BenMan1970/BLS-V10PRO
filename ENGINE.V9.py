@@ -1712,7 +1712,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
    n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
 @page{
   size:A4 portrait;
-  margin:4mm 8mm 6mm 8mm;
+  margin:12mm 10mm 12mm 10mm;
   @top-center{
     content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
     font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
@@ -1727,13 +1727,16 @@ tbody td{padding:5px 10px;vertical-align:middle}
   }
 }
 /* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
-@page:first{ @top-center{content:""} }
+@page:first{ margin-top:4mm; @top-center{content:""} }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   html,body{background:#fff!important;margin:0!important;padding:0!important;width:100%!important}
-  /* Base typographique : densité régulière, ~2 setups par page A4. */
-  body{font-size:7.4pt!important;line-height:1.4!important}
+  /* Base typographique calibrée : 7pt → densité institutionnelle ~2 setups/page A4 */
+  body{font-size:7pt!important;line-height:1.38!important}
+  /* zoom:0.82 → WeasyPrint scale le rendu HTML (~875px) dans la zone utile A4 10mm (~718px)
+     sans bande latérale ni débordement. Valeur calculée : 718/875 = 0.821 */
+  html{zoom:0.82!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:#fff!important}
   .wrap{padding:0!important}
 
