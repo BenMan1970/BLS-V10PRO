@@ -1701,10 +1701,10 @@ tbody td{padding:5px 10px;vertical-align:middle}
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html,body{background:#fff!important}
+  html,body{background:#fff!important;margin:0!important;padding:0!important;width:100%!important}
   /* Base typographique : densité régulière, ~2 setups par page A4. */
   body{font-size:7.4pt!important;line-height:1.4!important}
-  #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
+  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:#fff!important}
   .wrap{padding:0!important}
 
   /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
