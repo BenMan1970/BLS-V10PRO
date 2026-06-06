@@ -1704,8 +1704,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 /* page-top : wrapper header+subbar — neutre écran, contrôle de rupture en print */
 .page-top{display:block}
-/* page-running : neutre écran */
-.page-running{display:block}
+/* page-running :
+   - WeasyPrint lit position:running() dans le CSS global → sort le bloc du flux PDF
+   - @media screen override → position:static pour les navigateurs (rendu normal) */
+.page-running{position:running(pageheader)}
+@media screen{.page-running{position:static!important}}
 
 /* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.3) ═══════════════
    Stratégie zero-border définitive :
@@ -1741,10 +1744,9 @@ tbody td{padding:5px 10px;vertical-align:middle}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
   .wrap{padding:4mm 10mm 8mm 10mm!important}
 
-  /* ── RUNNING HEADER : wrapper sorti du flux → injecté dans @top-left chaque page ── */
+  /* ── RUNNING HEADER : wrapper déjà sorti du flux via CSS global (.page-running) ── */
   .page-top{display:block!important}
   .page-running{
-    position:running(pageheader)!important;
     width:210mm!important;
     background:var(--bg)!important;
   }
