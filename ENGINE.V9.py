@@ -52,7 +52,7 @@ logger = logging.getLogger("bluestar.v10")
 try:  # pragma: no cover
     from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     _HAS_WEASYPRINT = False
 
 
@@ -135,13 +135,13 @@ def _safe_float(v: Any) -> Optional[float]:
         if v is None:
             return None
         f = float(v)
-        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself — NaN check idiom
+        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself
     except (TypeError, ValueError):
         return None
 
 
 def _clamp01(x: float) -> float:
-    if x != x:  # pylint: disable=comparison-with-itself — NaN check idiom
+    if x != x:  # pylint: disable=comparison-with-itself
         return 0.0
     return max(0.0, min(1.0, x))
 
@@ -748,7 +748,7 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
-def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved for future use
+def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
@@ -762,7 +762,7 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved
+def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -837,7 +837,7 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     return out
 
 
-def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument — cfg reserved
+def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument
     """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
     Quantile NEVER influences conviction; only ordering here. Symbol is the
     final stable secondary key for bit-for-bit reproducibility."""
@@ -997,7 +997,7 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
-def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument — atr reserved
+def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
@@ -1336,7 +1336,7 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     return " · ".join(parts)
 
 
-def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument — themes reserved
+def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument
                 cal: Optional[CalendarSets], cfg: V4Config,
                 lv: Optional[LevelBundle] = None) -> SetupV4:
     if lv is None:
@@ -1551,7 +1551,7 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
     for sym, a in (raw.get("assets") or {}).items():
         try:
             assets[sym] = CanonicalAsset.model_validate(a)
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught — pydantic ValidationError + degraded mode
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             logger.warning("asset %s skipped: %s", sym, exc)
     return meta, assets
 
