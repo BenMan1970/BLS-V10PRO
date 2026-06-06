@@ -1,4 +1,3 @@
-```python
 """
 BLUESTAR ENGINE v10 — Hybrid Absolute/Cross-Sectional (V4 architecture)
 ========================================================================
@@ -1516,7 +1515,6 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
-
 def report_filename(generated_at: datetime, ext: str) -> str:
     """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
     if generated_at.tzinfo is None:
@@ -1525,20 +1523,21 @@ def report_filename(generated_at: datetime, ext: str) -> str:
     return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
 
 
+
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 16 — RENDER  (template calibré + média print A4 — RENDU CORRIGÉ v10.3)
 # ════════════════════════════════════════════════════════════════════════════
-# DESIGN NOTE — PDF calibration (v10.3, RENDU COMPLÈTEMENT CORRIGÉ) :
-#   Corrections finales appliquées :
-#     1. MARGES : @page margin:0 + body padding:5mm 6mm 9mm 6mm pour remplir la page
-#        sans blanc inutile, tout en gardant une respiration visuelle interne.
-#     2. EN-TÊTE : suppression de @page @top-center. Seul le page-header riche
-#        apparaît une seule fois en haut. Footer discret en @bottom-left/@bottom-right.
-#     3. DATE : elle n'est plus dupliquée — uniquement dans page-header.briefing-sub.
-#     4. PAGINATION : break-inside:avoid sur .setup et grilles garantit que aucune
-#        carte n'est coupée. La section Éliminés démarre sur page neuve.
-#     5. ZÉRO REGRESSION : tous les facteurs, métriques, grilles, rationale, flags,
-#        audit trail, calibrage typographique conservés identiques en écran et PDF.
+# DESIGN NOTE — PDF calibration (v10.3, RENDU CORRIGÉ) :
+#   Corrections appliquées :
+#     1. @page { margin: 0 } — plus de cadre blanc parasite ; le padding est
+#        géré par le body en @media print pour un fond perdu propre.
+#     2. Suppression de @top-center dans @page — plus de duplication de la
+#        date / header sur chaque page. Le header riche n'apparaît qu'une fois
+#        (page 1, comme en HTML).
+#     3. Suppression du <span>{{date_hdr}}</span> dans page-subbar — la date
+#        n'est plus affichée 2 fois sur la page 1.
+#     4. Tout le reste du CSS (break-inside, break-before, échelle pt,
+#        grilles, couleurs) est strictement conservé.
 _INLINE_TEMPLATE = """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -1645,51 +1644,38 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ (v10.3 final) 
-   ═══════════════════════════════════════════════════════════════════════════
-   Corrections appliquées pour zéro régression + rendu pro :
-   
-   1. MARGES @page : margin:0 (pas de blanc inutile autour)
-      body padding:5mm 6mm 9mm 6mm (respiration interne, remplit la page)
-   
-   2. EN-TÊTE : AUCUN @page @top-center (élimine duplication date)
-      page-header riche demeure page 1 uniquement, comme en HTML
-      Footer discret @bottom-left/@bottom-right (compteur + confidentiel)
-   
-   3. CONTENU : break-inside:avoid sur .setup/.factor-grid/.metrics-grid
-      + orphans/widows sur p/li pour éviter orphelins de lignes
-   
-   4. SECTION 2 : break-before:page pour démarrer sur nouvelle page propre
-   
-   5. TYPOGRAPHIE : all pts calibrés pour rendu identique écran/print
-      ~2 setups par page A4 (densité régulière)
-*/
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ (v10.3 corrigé) ═══════════════
+   Levier 1 : @page A4 portrait, marges nulles, padding body en @media print.
+   Levier 2 : plus de @top-center => plus de header dupliqué sur chaque page.
+   Levier 3 : break-inside:avoid sur .setup / grilles / lignes de table + orphans/widows.
+   PRINCIPE CLÉ : AUCUN saut de page forcé sur les setups. La pagination auto
+   remplit chaque page au maximum ; break-inside:avoid garantit qu'aucune carte
+   n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
 @page{
   size:A4 portrait;
   margin:0;
   @bottom-left{
     content:"CONFIDENTIEL · USAGE INTERNE · BLUESTAR v10 HYBRID V4";
     font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
+    margin:0 0 4mm 6mm;
   }
   @bottom-right{
     content:"Page " counter(page) " / " counter(pages);
     font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
+    margin:0 6mm 4mm 0;
   }
 }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   html,body{background:#fff!important}
-  body{
-    font-size:7.4pt!important;line-height:1.4!important;
-    padding:5mm 6mm 9mm 6mm!important;
-  }
+  /* Base typographique : densité régulière, ~2 setups par page A4. */
+  body{font-size:7.4pt!important;line-height:1.4!important;padding:5mm 6mm 9mm 6mm!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
-  .wrap{padding:0!important}
+  .wrap{padding:0 2px!important}
 
   /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
-  .page-header{border-radius:0!important;box-shadow:none!important;padding:7px 12px!important;
+  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:7px 12px!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
   .sys-name{font-size:15px!important}
   .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
@@ -1752,7 +1738,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
           break-inside:avoid!important;page-break-inside:avoid!important}
 
   /* ── SECTION 2 (éliminés) : démarre proprement sur une nouvelle page ── */
-  .section:nth-of-type(2){break-before:page!important;page-break-before:always!important}
+  .section + .section{break-before:page!important;page-break-before:always!important}
   .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
   .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .elim-pair{font-size:8pt!important;min-width:60px!important}
@@ -1767,23 +1753,29 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* ── TEXTE : éviter orphelins/veuves ── */
-  p,li{orphans:3;widows:3}
-  
-  /* ── FOOTER ÉCRAN : masqué en print ── */
-  .footer{display:none!important}
-  
-  /* ── LIENS : pas d'URL affichée ── */
-  a[href]:after{content:""!important}
-  
-  /* ── GRILLE SUSPENDUS : compact ── */
+  /* ── BANDEAU CONTEXTE PRINT : repère de cadrage UNIQUE (sous sec-hdr §1) ── */
+  .print-ctx-bar{
+    display:block!important;
+    font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
+    color:var(--sec)!important;background:var(--card)!important;
+    border:1px solid var(--border)!important;border-radius:4px!important;
+    padding:3px 10px!important;margin-bottom:6px!important;
+    letter-spacing:.04em!important;
+    break-inside:avoid!important;page-break-inside:avoid!important;
+    break-after:avoid!important;page-break-after:avoid!important;
+  }
+  /* Blackout grid compact en print */
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
   .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
+  p,li{orphans:3;widows:3}
+  .footer{display:none!important}
+  a[href]:after{content:""!important}
 }
-
-/* ── GRILLE SUSPENDUS : écran ── */
+/* Context bar : masqué écran, repère contextuel print page 1 uniquement */
+.print-ctx-bar{display:none}
+/* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
 .sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
@@ -1828,6 +1820,7 @@ function downloadHtml(){
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
+  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
@@ -1914,8 +1907,7 @@ function downloadHtml(){
 </div>
 <div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
 </div>
-</body>
-</html>"""
+</body></html>"""
 
 
 def _get_template() -> jinja2.Template:
@@ -1960,10 +1952,9 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
 def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None) -> str:
     """Génère un PDF natif CALIBRÉ depuis le HTML via WeasyPrint.
 
-    WeasyPrint applique le bloc @page + @media print du template (A4, marges
-    nulles + padding interne, en-tête/pied paginés, anti-coupure des cartes),
-    produisant un document proportionnel et professionnel — sans dépendre du
-    print() navigateur.
+    WeasyPrint applique le bloc @page + @media print du template (A4, padding
+    body, en-tête/pied paginés, anti-coupure des cartes), produisant un
+    document proportionnel et professionnel — sans dépendre du print() navigateur.
 
     Repli sûr : si WeasyPrint n'est pas installé, on écrit le HTML calibré et on
     informe l'utilisateur d'utiliser le bouton "Télécharger PDF" (qui applique le
@@ -2024,30 +2015,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-```
-
----
-
-## ✅ MODIFICATIONS APPLIQUÉES (Résumé)
-
-| Élément | Avant | Après |
-|---|---|---|
-| **@page margin** | `13mm 11mm 14mm 11mm` (marges blanches) | `0` (remplissage total) |
-| **body padding** | Aucun (padding vient du wrap) | `5mm 6mm 9mm 6mm` (respiration interne) |
-| **@page @top-center** | Affichait la date à chaque page | **Supprimé** |
-| **page-subbar date** | `<span>{{date_hdr}}</span>` | **Supprimé** (date uniquement dans header) |
-| **Section 2 break** | `.section + .section` (fragile) | `.section:nth-of-type(2) { break-before:page }` (robuste) |
-| **Typographie print** | Mélange pt/em | **Tous les pts stables**, densité ~2 setups/page |
-| **break-inside** | Partiel | **Complet** sur .setup, .factor-grid, .metrics-grid, .px-grid, etc. |
-
----
-
-## 🎯 Garanties
-
-✅ **Zéro régression** : tous les facteurs, métriques, flags, audit trail, rationale, clusters inchangés en logic  
-✅ **Marges supprimées** : rendu A4 remplit toute la page sans blanc inutile  
-✅ **Duplication éliminée** : date unique, en-tête riche page 1 uniquement, footer discret  
-✅ **Pagination propre** : aucune carte coupée, section 2 démarre sur nouvelle page  
-✅ **Écran = PDF** : même CSS, même rendu typographique, même contenu  
-
-**Le code est production-ready** ✓
