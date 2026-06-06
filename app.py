@@ -17,7 +17,7 @@ import streamlit as st
 try:
     from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught — WeasyPrint peut lever cffi.FFIError (non-OSError/ImportError)
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     _HAS_WEASYPRINT = False
 
 
@@ -175,7 +175,7 @@ if merged_file:
 
         except json.JSONDecodeError as e:
             st.error(f"JSON invalide : {e}")
-        except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught — display errors in UI, not fatal
+        except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             st.error(f"Erreur lecture : {e}")
 
 # -- Bouton run --
@@ -219,12 +219,12 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                     with st.spinner("Generation PDF natif..."):
                         try:
                             st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
-                        except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught — PDF errors are non-fatal, shown in UI
+                        except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                             st.session_state["report_pdf_err"] = str(pdf_err)
 
                 st.success("Rapport genere avec succes")
 
-            except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught — pipeline errors are surfaced via st.error
+            except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 st.error(f"Erreur pipeline : {e}")
                 st.exception(e)
                 st.stop()
