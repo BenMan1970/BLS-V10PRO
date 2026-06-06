@@ -1712,7 +1712,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
    n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
 @page{
   size:A4 portrait;
-  margin:3.5mm 2mm 5mm 2mm;
+  margin:4mm 8mm 6mm 8mm;
   @top-center{
     content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
     font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
@@ -1727,7 +1727,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   }
 }
 /* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
-@page:first{ margin-top:0; @top-center{content:""} }
+@page:first{ @top-center{content:""} }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
