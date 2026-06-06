@@ -1703,50 +1703,39 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ (v10.2 corrigé) ═══════════════
-   Levier 1 : @page A4 portrait, marges uniformes, en-tête/pied paginés (compteur).
-   Levier 2 : largeur de contenu = zone imprimable, échelle pt stable (pas de scale).
-   Levier 3 : break-inside:avoid sur .setup / grilles / lignes de table + orphans/widows.
-   PRINCIPE CLÉ : AUCUN saut de page forcé sur les setups. La pagination auto
-   remplit chaque page au maximum ; break-inside:avoid garantit qu'aucune carte
-   n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.2) ═══════════════
+   Stratégie zero-border :
+   @page margin:0 → supprime TOUTE bande blanche périphérique.
+   La typographie paginée (header/footer @page) est abandonnée au profit du
+   bloc .page-header HTML déjà présent, plus robuste et fidèle au rendu écran.
+   L'espace interne est recréé via padding sur #page (.wrap) — pleinement
+   contrôlé côté CSS sans dépendre du moteur de marges WeasyPrint.
+   break-inside:avoid maintenu sur toutes les cartes. */
 @page{
   size:A4 portrait;
-  margin:12mm 10mm 12mm 10mm;
-  @top-center{
-    content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
-  }
-  @bottom-left{
-    content:"CONFIDENTIEL · USAGE INTERNE · BLUESTAR v10 HYBRID V4";
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
-  }
-  @bottom-right{
-    content:"Page " counter(page) " / " counter(pages);
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
-  }
+  margin:0;
 }
-/* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
-@page:first{ margin-top:4mm; @top-center{content:""} }
+@page:first{ margin:0; }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html,body{background:#fff!important;margin:0!important;padding:0!important;width:100%!important}
+  html,body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important}
   /* Base typographique calibrée : 7pt → densité institutionnelle ~2 setups/page A4 */
   body{font-size:7pt!important;line-height:1.38!important}
-  /* zoom:0.82 → WeasyPrint scale le rendu HTML (~875px) dans la zone utile A4 10mm (~718px)
-     sans bande latérale ni débordement. Valeur calculée : 718/875 = 0.821 */
-  html{zoom:0.82!important}
-  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:#fff!important}
-  .wrap{padding:0!important}
+  /* Pas de zoom : @page margin:0 + padding interne gèrent l'espace — zoom WeasyPrint crée des bandes */
+  html{zoom:1!important}
+  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
+  /* Padding interne compensatoire : recrée l'espace de respiration sans bande blanche */
+  .wrap{padding:8mm 10mm!important}
 
-  /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
-  .page-header{border-radius:0!important;box-shadow:none!important;padding:7px 12px!important;
+  /* ── EN-TÊTE RICHE : page 1 uniquement, compact, plein bord ── */
+  .page-header{border-radius:0!important;box-shadow:none!important;padding:7px 10mm!important;
+               border-left:none!important;border-right:none!important;border-top:none!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
   .sys-name{font-size:15px!important}
   .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
   .logo-marker{width:24px!important;height:24px!important}
-  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important;
+  .page-subbar{box-shadow:none!important;padding:4px 10mm!important;gap:10px!important;font-size:7pt!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
 
   /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
@@ -1836,7 +1825,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
-  .footer{display:none!important}
+  /* Footer HTML maintenu en PDF (les marginales @page sont désactivées pour zero-border) */
+  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;border-top:1px solid var(--border)!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
