@@ -1148,7 +1148,7 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "NO_ATR"
         setup.reject_detail = "ATR ≤ 0"
         return setup
-    if not (cfg.RR_MIN <= setup.rr <= cfg.RR_MAX):
+    if setup.rr < cfg.RR_MIN or setup.rr > cfg.RR_MAX:
         setup.reject_code = "RR_OUT_OF_RANGE"
         setup.reject_detail = f"RR {setup.rr} ∉ [{cfg.RR_MIN},{cfg.RR_MAX}]"
         return setup
