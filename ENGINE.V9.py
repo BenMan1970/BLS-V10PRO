@@ -1702,15 +1702,18 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .briefing-sub{font-size:8.5px;color:var(--sec);font-family:var(--mono);margin-top:4px;letter-spacing:.02em}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
+/* page-top : wrapper header+subbar — neutre écran, contrôle de rupture en print */
+.page-top{display:block}
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.2) ═══════════════
-   Stratégie zero-border :
-   @page margin:0 → supprime TOUTE bande blanche périphérique.
-   La typographie paginée (header/footer @page) est abandonnée au profit du
-   bloc .page-header HTML déjà présent, plus robuste et fidèle au rendu écran.
-   L'espace interne est recréé via padding sur #page (.wrap) — pleinement
-   contrôlé côté CSS sans dépendre du moteur de marges WeasyPrint.
-   break-inside:avoid maintenu sur toutes les cartes. */
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.3) ═══════════════
+   Stratégie zero-border définitive :
+   - @page margin:0 → zéro bande blanche périphérique garantie
+   - html + body + #page background = var(--bg) → fond coloré jusqu'aux bords physiques
+   - .page-header / .page-subbar hors .wrap → full-bleed natif, pas de décalage
+   - .wrap padding interne = respiration du contenu sans bande blanche
+   - zoom:1 → WeasyPrint ne crée pas d'artefact de scaling
+   - letter-spacing:0 sur .footer en print → plus d'espacement caractère absurde à 6pt
+   - break-before:avoid sur .page-header → reste ancré en tête de page 1 */
 @page{
   size:A4 portrait;
   margin:0;
@@ -1719,24 +1722,39 @@ tbody td{padding:5px 10px;vertical-align:middle}
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html,body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important}
-  /* Base typographique calibrée : 7pt → densité institutionnelle ~2 setups/page A4 */
-  body{font-size:7pt!important;line-height:1.38!important}
-  /* Pas de zoom : @page margin:0 + padding interne gèrent l'espace — zoom WeasyPrint crée des bandes */
-  html{zoom:1!important}
+  /* html ET body portent le fond coloré → couvre physiquement les bords de la feuille */
+  html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
+  body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
-  /* Padding interne compensatoire : recrée l'espace de respiration sans bande blanche */
-  .wrap{padding:8mm 10mm!important}
+  /* Respiration interne du contenu — uniquement sur .wrap, pas sur le header */
+  .wrap{padding:6mm 10mm 8mm 10mm!important}
+  /* page-top : ancré en haut page 1, jamais fragmenté ni poussé en bas */
+  .page-top{
+    break-before:avoid!important;page-break-before:avoid!important;
+    break-inside:avoid!important;page-break-inside:avoid!important;
+    break-after:avoid!important;page-break-after:avoid!important;
+    display:block!important;
+  }
 
-  /* ── EN-TÊTE RICHE : page 1 uniquement, compact, plein bord ── */
-  .page-header{border-radius:0!important;box-shadow:none!important;padding:7px 10mm!important;
-               border-left:none!important;border-right:none!important;border-top:none!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
+  /* ── EN-TÊTE RICHE : full-bleed page 1, compact, ancré en tête ── */
+  .page-header{
+    border-radius:0!important;box-shadow:none!important;
+    padding:7px 10mm!important;
+    border-left:none!important;border-right:none!important;border-top:none!important;
+    break-before:avoid!important;page-break-before:avoid!important;
+    break-inside:avoid!important;page-break-inside:avoid!important;
+    break-after:avoid!important;page-break-after:avoid!important;
+  }
   .sys-name{font-size:15px!important}
   .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
   .logo-marker{width:24px!important;height:24px!important}
-  .page-subbar{box-shadow:none!important;padding:4px 10mm!important;gap:10px!important;font-size:7pt!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
+  .page-subbar{
+    box-shadow:none!important;padding:4px 10mm!important;gap:10px!important;font-size:7pt!important;
+    border-left:none!important;border-right:none!important;
+    break-before:avoid!important;page-break-before:avoid!important;
+    break-inside:avoid!important;page-break-inside:avoid!important;
+    break-after:avoid!important;page-break-after:avoid!important;
+  }
 
   /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
@@ -1825,8 +1843,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
-  /* Footer HTML maintenu en PDF (les marginales @page sont désactivées pour zero-border) */
-  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;border-top:1px solid var(--border)!important}
+  /* Footer HTML maintenu en PDF — letter-spacing:0 obligatoire à 6pt sinon espacement absurde */
+  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
@@ -1854,6 +1872,7 @@ function downloadHtml(){
 }
 </script>
 <div id="page">
+<div class="page-top">
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
@@ -1869,6 +1888,7 @@ function downloadHtml(){
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
+</div><!-- /.page-top -->
 <div class="wrap">
 
 <div class="section">
