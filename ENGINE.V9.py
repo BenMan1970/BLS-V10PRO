@@ -1704,6 +1704,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 /* page-top : wrapper header+subbar — neutre écran, contrôle de rupture en print */
 .page-top{display:block}
+/* page-running : neutre écran */
+.page-running{display:block}
 
 /* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD (v10.2.3) ═══════════════
    Stratégie zero-border définitive :
@@ -1712,46 +1714,60 @@ tbody td{padding:5px 10px;vertical-align:middle}
    - .page-header / .page-subbar hors .wrap → full-bleed natif, pas de décalage
    - .wrap padding interne = respiration du contenu sans bande blanche
    - zoom:1 → WeasyPrint ne crée pas d'artefact de scaling
-   - letter-spacing:0 sur .footer en print → plus d'espacement caractère absurde à 6pt
-   - break-before:avoid sur .page-header → reste ancré en tête de page 1 */
+   - position:running(pageheader) → mécanisme natif WeasyPrint pour en-tête répété chaque page
+   - @page margin-top calibré pour accueillir le slot header (22mm) */
+
+/* Marge top pour le slot running header ; autres bords à 0 */
 @page{
   size:A4 portrait;
-  margin:0;
+  margin:22mm 0 0 0;
+  @top-left{
+    content:element(pageheader);
+    vertical-align:top;
+  }
 }
-@page:first{ margin:0; }
+@page:first{
+  margin:22mm 0 0 0;
+  @top-left{
+    content:element(pageheader);
+    vertical-align:top;
+  }
+}
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  /* html ET body portent le fond coloré → couvre physiquement les bords de la feuille */
   html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
   body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
-  /* page-top en flow normal — page-header sera sorti du flow via position:fixed */
-  .page-top{display:block!important;}
+  .wrap{padding:4mm 10mm 8mm 10mm!important}
 
-  /* ── EN-TÊTE RICHE : position:fixed top:0 → WeasyPrint le répète en haut de chaque page ── */
+  /* ── RUNNING HEADER : wrapper sorti du flux → injecté dans @top-left chaque page ── */
+  .page-top{display:block!important}
+  .page-running{
+    position:running(pageheader)!important;
+    width:210mm!important;
+    background:var(--bg)!important;
+  }
   .page-header{
-    position:fixed!important;
-    top:0!important;left:0!important;right:0!important;
+    display:flex!important;
+    position:static!important;
     border-radius:0!important;box-shadow:none!important;
-    padding:5px 10mm!important;
+    padding:4px 10mm!important;
     border-left:none!important;border-right:none!important;border-top:none!important;
-    z-index:1000!important;
-    break-inside:avoid!important;
+    background:linear-gradient(135deg,#F8FAFF 0%,#F0F4FE 100%)!important;
+    border-bottom:1px solid var(--border)!important;
   }
-  .sys-name{font-size:13px!important}
-  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6pt!important}
-  .logo-marker{width:22px!important;height:22px!important}
-  /* page-subbar : fixed à 14mm (sous le header) → contexte visible sur chaque page */
+  .sys-name{font-size:12px!important}
+  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:5.5pt!important}
+  .logo-marker{width:20px!important;height:20px!important}
   .page-subbar{
-    position:fixed!important;
-    top:14mm!important;left:0!important;right:0!important;
-    box-shadow:none!important;padding:3px 10mm!important;gap:8px!important;font-size:6.5pt!important;
+    display:flex!important;
+    position:static!important;
+    box-shadow:none!important;padding:2px 10mm!important;gap:8px!important;font-size:6pt!important;
     border-left:none!important;border-right:none!important;
-    z-index:999!important;
+    background:rgba(27,69,180,.04)!important;
+    border-bottom:1px solid var(--border)!important;
   }
-  /* .wrap : marge haute pour dégager header+subbar fixes (14mm header + 6mm subbar + 2mm gap) */
-  .wrap{padding:23mm 10mm 8mm 10mm!important}
 
   /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
@@ -1870,6 +1886,7 @@ function downloadHtml(){
 </script>
 <div id="page">
 <div class="page-top">
+<div class="page-running">
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
@@ -1885,6 +1902,7 @@ function downloadHtml(){
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
+</div><!-- /.page-running -->
 </div><!-- /.page-top -->
 <div class="wrap">
 
