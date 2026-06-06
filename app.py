@@ -238,13 +238,13 @@ if "report_html" in st.session_state:
 
     # Telechargements
     st.divider()
-    dl_col1, dl_col2, dl_col3 = st.columns(3)
+    dl_col1, dl_col2 = st.columns(2)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
     with dl_col1:
         st.download_button(
-            label="HTML",
+            label="Telecharger HTML",
             data=html,
             file_name=f"bluestar_report_{timestamp}.html",
             mime="text/html",
@@ -254,28 +254,17 @@ if "report_html" in st.session_state:
     with dl_col2:
         if _HAS_WEASYPRINT and st.session_state.get("report_pdf"):
             st.download_button(
-                label="PDF natif",
+                label="Telecharger PDF",
                 data=st.session_state["report_pdf"],
                 file_name=f"bluestar_report_{timestamp}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
         else:
-            st.button("PDF natif", disabled=True, use_container_width=True)
+            st.button("Telecharger PDF", disabled=True, use_container_width=True)
             if st.session_state.get("report_pdf_err"):
                 err = st.session_state["report_pdf_err"]
                 st.error(f"PDF err : {err[:100]}")
-
-    with dl_col3:
-        # Fallback : sauvegarder le HTML avec extension .pdf.html
-        st.download_button(
-            label="HTML (fallback PDF)",
-            data=html,
-            file_name=f"bluestar_report_{timestamp}.pdf.html",
-            mime="text/html",
-            use_container_width=True,
-            help="Ouvrez ce fichier dans Chrome -> Ctrl+P -> Enregistrer en PDF. Meme CSS @page que le PDF natif.",
-        )
 
 else:
     st.info("Upload le fichier merged JSON pour lancer le pipeline.")
