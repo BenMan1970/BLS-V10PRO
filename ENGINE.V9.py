@@ -1682,7 +1682,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
    n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
 @page{
   size:A4 portrait;
-  margin:13mm 11mm 14mm 11mm;
+  margin:5mm 5mm 6mm 5mm;
   @top-center{
     content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
     font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
@@ -1705,7 +1705,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   /* Base typographique : densité régulière, ~2 setups par page A4. */
   body{font-size:7.4pt!important;line-height:1.4!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
-  .wrap{padding:0 2px!important}
+  .wrap{padding:0!important}
 
   /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
   .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:7px 12px!important;
