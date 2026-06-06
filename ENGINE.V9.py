@@ -1726,35 +1726,32 @@ tbody td{padding:5px 10px;vertical-align:middle}
   html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
   body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
-  /* Respiration interne du contenu — uniquement sur .wrap, pas sur le header */
-  .wrap{padding:6mm 10mm 8mm 10mm!important}
-  /* page-top : ancré en haut page 1, jamais fragmenté ni poussé en bas */
-  .page-top{
-    break-before:avoid!important;page-break-before:avoid!important;
-    break-inside:avoid!important;page-break-inside:avoid!important;
-    break-after:avoid!important;page-break-after:avoid!important;
-    display:block!important;
-  }
+  /* page-top en flow normal — page-header sera sorti du flow via position:fixed */
+  .page-top{display:block!important;}
 
-  /* ── EN-TÊTE RICHE : full-bleed page 1, compact, ancré en tête ── */
+  /* ── EN-TÊTE RICHE : position:fixed top:0 → WeasyPrint le répète en haut de chaque page ── */
   .page-header{
+    position:fixed!important;
+    top:0!important;left:0!important;right:0!important;
     border-radius:0!important;box-shadow:none!important;
-    padding:7px 10mm!important;
+    padding:5px 10mm!important;
     border-left:none!important;border-right:none!important;border-top:none!important;
-    break-before:avoid!important;page-break-before:avoid!important;
-    break-inside:avoid!important;page-break-inside:avoid!important;
-    break-after:avoid!important;page-break-after:avoid!important;
+    z-index:1000!important;
+    break-inside:avoid!important;
   }
-  .sys-name{font-size:15px!important}
-  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
-  .logo-marker{width:24px!important;height:24px!important}
+  .sys-name{font-size:13px!important}
+  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6pt!important}
+  .logo-marker{width:22px!important;height:22px!important}
+  /* page-subbar : fixed à 14mm (sous le header) → contexte visible sur chaque page */
   .page-subbar{
-    box-shadow:none!important;padding:4px 10mm!important;gap:10px!important;font-size:7pt!important;
+    position:fixed!important;
+    top:14mm!important;left:0!important;right:0!important;
+    box-shadow:none!important;padding:3px 10mm!important;gap:8px!important;font-size:6.5pt!important;
     border-left:none!important;border-right:none!important;
-    break-before:avoid!important;page-break-before:avoid!important;
-    break-inside:avoid!important;page-break-inside:avoid!important;
-    break-after:avoid!important;page-break-after:avoid!important;
+    z-index:999!important;
   }
+  /* .wrap : marge haute pour dégager header+subbar fixes (14mm header + 6mm subbar + 2mm gap) */
+  .wrap{padding:23mm 10mm 8mm 10mm!important}
 
   /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
