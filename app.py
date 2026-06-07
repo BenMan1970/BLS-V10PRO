@@ -6,7 +6,6 @@ import importlib.util
 import sys
 import tempfile
 import os
-import base64
 import io
 import json
 from pathlib import Path
@@ -211,6 +210,14 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
 
                 html = run_pipeline(**kwargs)
 
+                # Nom de fichier stocké en session pour rester disponible au téléchargement
+                try:
+                    _md = json.loads(merged_file.getvalue().decode("utf-8"))
+                    _ga = _md.get("meta", {}).get("generated_at", "")
+                    _rd = datetime.fromisoformat(_ga.replace("Z", "+00:00")).strftime("%Y.%m.%d")
+                except Exception:  # noqa: BLE001
+                    _rd = datetime.now().strftime("%Y.%m.%d")
+                st.session_state["report_base_name"] = f"BLUESTAR FX Desk_Signal Report_{_rd}"
                 st.session_state["report_html"] = html
                 st.session_state["report_pdf"] = None
                 st.session_state["report_pdf_err"] = None
@@ -219,16 +226,7 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                 if _HAS_WEASYPRINT:
                     with st.spinner("Generation PDF natif..."):
                         try:
-                            pdf_bytes = _html_to_pdf_bytes(html)
-                            st.session_state["report_pdf"] = pdf_bytes
-                            # Injecter le PDF en base64 dans le bouton du HTML
-                            pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-                            html = html.replace(
-                                'id="_pdf_b64_data" value=""',
-                                f'id="_pdf_b64_data" value="{pdf_b64}"',
-                                1,
-                            )
-                            st.session_state["report_html"] = html
+                            st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
                         except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                             st.session_state["report_pdf_err"] = str(pdf_err)
 
@@ -258,15 +256,7 @@ if "report_html" in st.session_state:
     # Telechargements
     st.divider()
 
-    # Nom de fichier : date du rapport extraite du merged JSON
-    try:
-        _merged_data = json.loads(merged_file.getvalue().decode("utf-8"))
-        _gen_at = _merged_data.get("meta", {}).get("generated_at", "")
-        _report_date = datetime.fromisoformat(_gen_at.replace("Z", "+00:00")).strftime("%Y.%m.%d")
-    except Exception:  # noqa: BLE001
-        _report_date = datetime.now().strftime("%Y.%m.%d")
-    _base_name = f"BLUESTAR FX Desk_Signal Report_{_report_date}"
-
+    _base_name = st.session_state.get("report_base_name", "BLUESTAR FX Desk_Signal Report")
     dl_col1, dl_col2 = st.columns(2)
 
     with dl_col1:
@@ -281,7 +271,7 @@ if "report_html" in st.session_state:
     with dl_col2:
         if _HAS_WEASYPRINT and st.session_state.get("report_pdf"):
             st.download_button(
-                label="📥 Telecharger PDF",
+                label="Telecharger PDF",
                 data=st.session_state["report_pdf"],
                 file_name=f"{_base_name}.pdf",
                 mime="application/pdf",
