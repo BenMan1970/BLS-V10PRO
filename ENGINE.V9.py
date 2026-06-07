@@ -1815,14 +1815,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
   .footer{display:block!important;padding:5px 5mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
-  #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
 .print-ctx-bar{display:none}
-/* Bouton PDF flottant — masqué en print */
-#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
-#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
+
 /* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
@@ -1844,24 +1841,7 @@ function downloadHtml(){
   document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 }
-function downloadPdf(){
-  const b64=document.getElementById('_pdf_b64_data');
-  if(!b64||!b64.value){window.print();return;}
-  const byteStr=atob(b64.value);
-  const buf=new Uint8Array(byteStr.length);
-  for(let i=0;i<byteStr.length;i++)buf[i]=byteStr.charCodeAt(i);
-  const blob=new Blob([buf],{type:'application/pdf'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.pdf";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(a.href);
-}
 </script>
-<input type="hidden" id="_pdf_b64_data" value="{{pdf_b64}}">
-<div id="pdf-fab"><button onclick="downloadPdf()">Télécharger PDF</button></div>
 <div id="page">
 <div class="wrap">
 <div class="page-top">
