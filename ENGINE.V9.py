@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import math
@@ -45,17 +46,13 @@ logger = logging.getLogger("bluestar.v10")
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
-try:  # pragma: no cover
-    from merge_appbackup import Direction as _UpstreamDirection  # noqa: F401
-    _HAS_UPSTREAM = True
-except Exception:
-    _HAS_UPSTREAM = False
+# FIX-E01: import merge_appbackup supprimé (module inexistant, _HAS_UPSTREAM inutilisé)
 
 # Optional PDF backend — native, calibrated rendering. Never blocking at import.
 try:  # pragma: no cover
-    from weasyprint import HTML as _WeasyHTML  # type: ignore
+    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-except Exception:
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     _HAS_WEASYPRINT = False
 
 
@@ -82,7 +79,7 @@ class EventTier(str, Enum):
 
 
 class GateCode(str, Enum):
-    PASS = "PASS"
+    PASS = "PASS"  # nosec B105 — état métier Enum, pas un mot de passe
     G0_SCHEMA_ASSET_ERROR = "SCHEMA_ASSET_ERROR"
     G1_CAL_BLACKOUT = "CAL_BLACKOUT"
     G2_LOW_QUALITY = "LOW_QUALITY"
@@ -138,13 +135,13 @@ def _safe_float(v: Any) -> Optional[float]:
         if v is None:
             return None
         f = float(v)
-        return f if f == f and f not in (float("inf"), float("-inf")) else None
+        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself
     except (TypeError, ValueError):
         return None
 
 
 def _clamp01(x: float) -> float:
-    if x != x:  # NaN
+    if x != x:  # pylint: disable=comparison-with-itself
         return 0.0
     return max(0.0, min(1.0, x))
 
@@ -586,6 +583,7 @@ class V4Config:
     LIMIT_ZONE_MAX_DIST: float = 2.0
     TP1_ATR_MULT: float = 2.0
     TP2_ATR_MULT: float = 1.0
+    TP_MAX_ATR_MULT: float = 4.0       # Garde: zone SR utilisée comme TP doit être ≤ 4×ATR
     # selection
     MAX_SETUPS: int = 5
     MAX_EXPOSURE_PER_CCY: int = 2
@@ -750,7 +748,7 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
-def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
+def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
@@ -764,7 +762,7 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:
+def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -839,7 +837,7 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     return out
 
 
-def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:
+def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument
     """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
     Quantile NEVER influences conviction; only ordering here. Symbol is the
     final stable secondary key for bit-for-bit reproducibility."""
@@ -999,7 +997,7 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
-def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,
+def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
@@ -1027,11 +1025,21 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
     detail = f"Raw SL={sl_raw:.5f} ({bb_regime} ×{bb_mult})"
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
+        # Vérifier que la zone est VRAIMENT derrière le SL (du bon côté du trade)
         if direction is Direction.BULLISH:
-            sl = min(sl_raw, z.level - 0.3 * atr)
+            sl_candidate = z.level - 0.3 * atr
+            if sl_candidate < sl_raw:
+                sl = sl_candidate
+                detail += f" zone-adj→{sl:.5f}"
+            else:
+                detail += f" [zone {z.level:.5f} au-dessus du SL, pas d'ajustement]"
         elif direction is Direction.BEARISH:
-            sl = max(sl_raw, z.level + 0.3 * atr)
-        detail += f" zone-adj→{sl:.5f}"
+            sl_candidate = z.level + 0.3 * atr
+            if sl_candidate > sl_raw:
+                sl = sl_candidate
+                detail += f" zone-adj→{sl:.5f}"
+            else:
+                detail += f" [zone {z.level:.5f} sous le SL, pas d'ajustement]"
     min_dist = atr * cfg.SL_FLOOR_MULT
     if abs(entry - sl) < min_dist:
         sl = entry - min_dist if direction is Direction.BULLISH else entry + min_dist
@@ -1044,7 +1052,11 @@ def compute_tp1(a: CanonicalAsset, entry: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = _get_opposite_zone(a, direction)
     if opp:
-        return opp.level, (round(abs(opp.level - entry) / atr, 2) if atr > 0 else None), False
+        dist_atr = abs(opp.level - entry) / atr if atr > 0 else float("inf")
+        if dist_atr <= cfg.TP_MAX_ATR_MULT:
+            # Zone opposée proche et réaliste → l'utiliser comme TP1
+            return opp.level, round(dist_atr, 2), False
+        # Zone opposée trop loin → la réserver pour TP2, utiliser synthétique pour TP1
     tp1 = entry + cfg.TP1_ATR_MULT * atr if direction is Direction.BULLISH else entry - cfg.TP1_ATR_MULT * atr
     return tp1, cfg.TP1_ATR_MULT, True
 
@@ -1054,9 +1066,13 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = [z for z in sorted(a.zones, key=lambda z: z.distance_pct)
            if _is_opposite(z, direction)]
-    if len(opp) >= 2:
-        lvl = opp[1].level
-        return lvl, (round(abs(lvl - entry) / atr, 2) if atr > 0 else None), False
+    # Chercher une zone opposée lointaine (> TP_MAX_ATR_MULT) pour TP2
+    for z in opp:
+        dist_atr = abs(z.level - entry) / atr if atr > 0 else float("inf")
+        if dist_atr > cfg.TP_MAX_ATR_MULT:
+            # Zone lointaine = objectif long terme, utiliser comme TP2
+            return z.level, round(dist_atr, 2), False
+    # Pas de zone lointaine → TP2 synthétique conservateur
     tp2 = tp1 + cfg.TP2_ATR_MULT * atr if direction is Direction.BULLISH else tp1 - cfg.TP2_ATR_MULT * atr
     return tp2, (round(abs(tp2 - entry) / atr, 2) if atr > 0 else None), True
 
@@ -1064,8 +1080,8 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
 def compute_rr(entry: float, sl: float, tp1: float, tp2: Optional[float],
                tp1_syn: bool, tp2_syn: bool) -> tuple[float, str]:
     risk = abs(entry - sl)
-    if risk <= 0:
-        return 0.0, "Risk=0, invalid"
+    if risk <= 0 or math.isclose(risk, 0.0, abs_tol=1e-12):
+        return 0.0, "Risk ~0, invalid"
     r1 = abs(tp1 - entry)
     if tp2 is None:
         rr = r1 / risk
@@ -1132,7 +1148,7 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "NO_ATR"
         setup.reject_detail = "ATR ≤ 0"
         return setup
-    if not (cfg.RR_MIN <= setup.rr <= cfg.RR_MAX):
+    if setup.rr < cfg.RR_MIN or setup.rr > cfg.RR_MAX:
         setup.reject_code = "RR_OUT_OF_RANGE"
         setup.reject_detail = f"RR {setup.rr} ∉ [{cfg.RR_MIN},{cfg.RR_MAX}]"
         return setup
@@ -1302,7 +1318,9 @@ def _htf_aligned(a: CanonicalAsset) -> bool:
 
 
 def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
-               flags: list[Flag], lv: LevelBundle) -> str:
+               flags: list[Flag], lv: Optional[LevelBundle] = None) -> str:
+    if lv is None:
+        lv = build_levels(a)
     parts = [f"Score absolu {fv.absolute_mean:.2f}"]
     top = sorted(fv.present, key=lambda n: -fv.get(n))[:3]
     parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}" for n in top))
@@ -1318,9 +1336,11 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     return " · ".join(parts)
 
 
-def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
-                cal: Optional[CalendarSets], cfg: V4Config) -> SetupV4:
-    lv = build_levels(a, cfg)
+def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument
+                cal: Optional[CalendarSets], cfg: V4Config,
+                lv: Optional[LevelBundle] = None) -> SetupV4:
+    if lv is None:
+        lv = build_levels(a, cfg)
     cal_status, cal_note = _compute_cal_status(a, cal)
     fs = FactorScores(
         f1_hwa=round(fv.get("f1_hwa"), 4),
@@ -1358,6 +1378,73 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     )
 
 
+
+def _pipeline_factors_and_grades(
+    universe: Universe,
+    themes: MarketThemes,
+    cal_sets: CalendarSets,
+    clock: Clock,
+    config: V4Config,
+) -> tuple[list[FactorVector], list[SetupV4], dict[str, LevelBundle]]:
+    """Etapes 5-7 : factor vectors, drafts, quantiles, contradictions, grade."""
+    vectors: list[FactorVector] = []
+    drafts: list[SetupV4] = []
+    lv_cache: dict[str, LevelBundle] = {}
+    for a in universe.passed:
+        fv = build_factor_vector(a, themes, cal_sets, clock, config)
+        vectors.append(fv)
+        lv = build_levels(a, config)
+        lv_cache[a.symbol] = lv
+        drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
+    # cross-section quantiles
+    quantiles = compute_quantiles(vectors)
+    for s in drafts:
+        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
+    # contradictions + grade
+    asset_by_sym = {a.symbol: a for a in universe.passed}
+    fv_by_sym = {v.symbol: v for v in vectors}
+    for s in drafts:
+        a = asset_by_sym[s.symbol]
+        fv = fv_by_sym[s.symbol]
+        flags = detect_contradictions(a, fv, themes, cal_sets, config)
+        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
+        cap, cap_reason = apply_caps(a, fv, config)
+        if cap_reason:
+            s.capped_reason = cap_reason
+        s.conviction = grade(fv.absolute_mean, flags, cap, config)
+        s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
+    return vectors, drafts, lv_cache
+
+
+def _pipeline_rank_and_diversify(
+    drafts: list[SetupV4],
+    themes: MarketThemes,
+    config: V4Config,
+) -> tuple[list[SetupV4], list[SetupV4], list[SetupV4]]:
+    """Etapes 8-10 : preflight, rank, diversify. Retourne (final, preflight_rejects, ranked)."""
+    for s in drafts:
+        preflight(s, config)
+    valid = [s for s in drafts if s.reject_code is None]
+    preflight_rejects = [s for s in drafts if s.reject_code is not None]
+    ranked = rank_setups(valid, config)
+    final = diversify(ranked, themes, config)
+    return final, preflight_rejects, ranked
+
+
+def _pipeline_collect_eliminated(
+    universe: Universe,
+    preflight_rejects: list[SetupV4],
+    ranked: list[SetupV4],
+    final: list[SetupV4],
+) -> list[Eliminated]:
+    """Etape 11 : collecte des assets elimines (gates + preflight + non-representants)."""
+    eliminated = _collect_eliminated(universe)
+    eliminated.extend(_eliminated_from_setups(preflight_rejects))
+    final_syms = {s.symbol for s in final}
+    non_reps = [s for s in ranked if s.symbol not in final_syms]
+    eliminated.extend(_eliminated_from_setups(non_reps))
+    return eliminated
+
 def run_pipeline(
     merged_path: str,
     calendar_path: Optional[str] = None,
@@ -1374,6 +1461,12 @@ def run_pipeline(
     calendar_data = load_calendar(calendar_json_path)
     clock = Clock.from_meta(meta.generated_at)
 
+    # Auto-nommage si pas de chemin explicite
+    if output_path is None:
+        output_path = report_filename(meta.generated_at, "html")
+    if pdf_path is None:
+        pdf_path = report_filename(meta.generated_at, "pdf")
+
     # 2 — calendar buckets
     cal_sets = calendar_data.bucket(clock.now_utc)
 
@@ -1383,51 +1476,17 @@ def run_pipeline(
     # 4 — themes
     themes = detect_currency_themes(assets, config)
 
-    # 5 — factor vectors + drafts (levels)
-    vectors: list[FactorVector] = []
-    drafts: list[SetupV4] = []
-    for a in universe.passed:
-        fv = build_factor_vector(a, themes, cal_sets, clock, config)
-        vectors.append(fv)
-        drafts.append(_make_draft(a, fv, themes, cal_sets, config))
+    # 5-7 — factor vectors, drafts, grades
+    vectors, drafts, lv_cache = _pipeline_factors_and_grades(
+        universe, themes, cal_sets, clock, config)
 
-    # 6 — cross-section quantiles (tie-break/diversif only)
-    quantiles = compute_quantiles(vectors)
-    for s in drafts:
-        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
-
-    # 7 — contradictions + grade (vetos -> caps -> grid)
-    asset_by_sym = {a.symbol: a for a in universe.passed}
-    fv_by_sym = {v.symbol: v for v in vectors}
-    for s in drafts:
-        a = asset_by_sym[s.symbol]
-        fv = fv_by_sym[s.symbol]
-        flags = detect_contradictions(a, fv, themes, cal_sets, config)
-        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
-        cap, cap_reason = apply_caps(a, fv, config)
-        if cap_reason:
-            s.capped_reason = cap_reason
-        s.conviction = grade(fv.absolute_mean, flags, cap, config)
-        s.rationale = _rationale(a, fv, themes, flags, build_levels(a, config))
-
-    # 8 — preflight (before rank)
-    for s in drafts:
-        preflight(s, config)
-    valid = [s for s in drafts if s.reject_code is None]
-    preflight_rejects = [s for s in drafts if s.reject_code is not None]
-
-    # 9 — rank (absolute_mean DESC + tie-break)
-    ranked = rank_setups(valid, config)
-
-    # 10 — diversify (cluster -> representative -> cap -> top N)
-    final = diversify(ranked, themes, config)
+    # 8-10 — preflight, rank, diversify
+    final, preflight_rejects, ranked = _pipeline_rank_and_diversify(
+        drafts, themes, config)
 
     # 11 — collect eliminated
-    eliminated = _collect_eliminated(universe)
-    eliminated.extend(_eliminated_from_setups(preflight_rejects))
-    final_syms = {s.symbol for s in final}
-    non_reps = [s for s in ranked if s.symbol not in final_syms]
-    eliminated.extend(_eliminated_from_setups(non_reps))
+    eliminated = _pipeline_collect_eliminated(
+        universe, preflight_rejects, ranked, final)
 
     # 12 — render (HTML)
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
@@ -1437,7 +1496,11 @@ def run_pipeline(
             f.write(html)
     # 12b — render (PDF natif calibré) — optionnel, jamais bloquant
     if pdf_path:
-        render_pdf(html, pdf_path)
+        # FIX-BUG: passer fallback_html explicitement (régression V10 vs V9 — sans
+        # cet argument, render_pdf logue une erreur et ne produit rien du tout
+        # quand WeasyPrint est absent, alors que le V9 écrivait un repli HTML).
+        _fb = pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf") else pdf_path + ".html"
+        render_pdf(html, pdf_path, fallback_html=_fb)
     return html
 
 
@@ -1472,11 +1535,23 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
+    # FIX-E02: vérification version schéma merge
+    if meta.version:
+        try:
+            min_version = "3.4.0"
+            meta_v = tuple(int(x) for x in meta.version.split(".")[:3])
+            min_v = tuple(int(x) for x in min_version.split(".")[:3])
+            if meta_v < min_v:
+                logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)", meta.version, min_version)
+        except (ValueError, AttributeError):
+            logger.warning("Version schéma non parseable: %s", meta.version)
+    else:
+        logger.warning("Version schéma absente dans le merge")
     assets: dict[str, CanonicalAsset] = {}
     for sym, a in (raw.get("assets") or {}).items():
         try:
             assets[sym] = CanonicalAsset.model_validate(a)
-        except Exception as exc:  # never blocking — degraded mode
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             logger.warning("asset %s skipped: %s", sym, exc)
     return meta, assets
 
@@ -1490,27 +1565,44 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
+def report_filename(generated_at: datetime, ext: str) -> str:
+    """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    local = generated_at.astimezone(timezone(timedelta(hours=1)))
+    return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
+
+
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 16 — RENDER  (template calibré + média print A4 maîtrisé)
+# SECTION 16 — RENDER  (template calibré + média print A4 — RENDU CORRIGÉ v10.2)
 # ════════════════════════════════════════════════════════════════════════════
-# DESIGN NOTE — PDF calibration:
-#   Le calibrage repose sur 3 leviers, tous dans le CSS @media print ci-dessous,
-#   activés à l'identique par WeasyPrint (PDF natif) ET par l'impression
-#   navigateur (repli) :
-#     1. @page : A4 portrait, marges UNIFORMES (12mm), en-tête/pied paginés
-#        via @top-center / @bottom-center + compteur de page.
-#     2. Échelle typographique en unités relatives stables (pas de px flottants)
-#        pour un rendu proportionnel identique quel que soit le moteur.
-#     3. break-inside:avoid sur .section / .setup / table-row + orphans/widows
-#        pour empêcher les cartes coupées entre deux pages (cause n°1 du rendu
-#        "pas pro").
+# DESIGN NOTE — PDF calibration (v10.2, RENDU CORRIGÉ) :
+#   Corrections appliquées par rapport au template précédent (cause du rendu
+#   "pas pro" en PDF) :
+#     1. SUPPRESSION DÉFINITIVE des sauts de page forcés tous les 2 setups
+#        (les anciens `.print-ctx-bar.print-pb` sur loop.index odd). Ils
+#        créaient de grands blancs en bas de page + un setup orphelin, exactement
+#        le défaut décrit dans la note d'origine. La pagination automatique
+#        combinée à break-inside:avoid remplit chaque page au maximum sans jamais
+#        couper une carte.
+#     2. Le bandeau de contexte print n'apparaît plus QU'UNE SEULE FOIS, sous
+#        l'en-tête de la section 1 (loop.first), comme repère de cadrage initial.
+#        Plus aucun bandeau de continuation parasite en milieu de flux.
+#     3. Audit trail homogène : toutes les cartes utilisent le même bloc compact
+#        et lisible (plus d'exception sur la dernière carte).
+#     4. En-tête riche en page 1 uniquement (flux) ; pages 2+ ne portent que la
+#        marginale @top-* légère. Plus de double information.
+#     5. Marginales @page épurées + échelle typographique en pt stables pour un
+#        rendu proportionnel identique entre WeasyPrint et l'impression navigateur.
+#     6. La section « Éliminés » démarre proprement sur une nouvelle page
+#        (break-before:page), sans laisser d'orphelin de la section 1.
 _INLINE_TEMPLATE = """<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BLUESTAR FX CASCADE – {{date_hdr}}</title>
+<title>BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
 :root{
@@ -1610,119 +1702,102 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .briefing-sub{font-size:8.5px;color:var(--sec);font-family:var(--mono);margin-top:4px;letter-spacing:.02em}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
+.page-top{display:block}
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ ═══════════════
-   Levier 1 : page A4 + marges uniformes + en-tête/pied paginés.
-   Levier 2 : largeur de contenu fixée à la zone imprimable (pas de scale).
-   Levier 3 : anti-coupure (break-inside) + orphans/widows.                */
-@page{
-  size:A4 portrait;
-  margin:14mm 12mm 16mm 12mm;
-  @top-left{
-    content:"BLUESTAR · FX CASCADE";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#1B45B4;font-weight:700;letter-spacing:.1em;
-  }
-  @top-center{
-    content:"{{date_hdr}}";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
-  }
-  @top-right{
-    content:"Page " counter(page) " / " counter(pages);
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
-  }
-  @bottom-left{
-    content:"CONFIDENTIEL · USAGE INTERNE";
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
-  }
-  @bottom-center{
-    content:"BLUESTAR SYSTEM v10 HYBRID V4";
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
-  }
-  @bottom-right{
-    content:"Score absolu · Quantile départage";
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
-  }
-}
-@page:first{
-  @top-left{content:""}
-  @top-center{content:""}
-  @top-right{content:""}
-}
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD ═══════════════ */
+@page{size:A4 portrait;margin:0}
+
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html,body{background:#fff!important}
-  /* Taille de base réduite pour densifier le rendu — cible: ~2 setups/page */
-  body{font-size:7.2pt!important;line-height:1.35!important}
-  #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
-  .wrap{padding:0 4px!important}
+  html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
+  body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
+  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
 
-  /* ── EN-TÊTE : compact, ne doit pas voler de l'espace ── */
-  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:6px 12px!important}
-  .sys-name{font-size:14px!important}
-  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
-  .logo-marker{width:24px!important;height:24px!important}
-  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important}
+  /* ── EN-TÊTE : dans le flux du wrap, margin négatif pour full-bleed ── */
+  .page-top{
+    break-inside:avoid!important;break-after:avoid!important;
+    margin:-5mm -10mm 4mm -10mm!important;
+  }
+  .page-header{
+    border-radius:0!important;box-shadow:none!important;
+    padding:3px 10mm!important;min-height:0!important;
+    border-left:none!important;border-right:none!important;border-top:none!important;
+    border-bottom:1px solid var(--border)!important;
+  }
+  .page-header::after{display:none!important}
+  .header-left{gap:6px!important}
+  .sys-name{font-size:10px!important;line-height:1!important}
+  .sys-label{font-size:5pt!important;letter-spacing:.1em!important}
+  .sys-desc{font-size:5pt!important;margin-top:0!important}
+  .briefing-label{font-size:5pt!important}
+  .briefing-sub{font-size:5pt!important;margin-top:1px!important}
+  .logo-marker{width:16px!important;height:16px!important;padding:1px!important}
+  .logo-marker svg{width:14px!important;height:14px!important}
+  .header-right{padding-left:8px!important}
+  .page-subbar{
+    padding:2px 10mm!important;gap:6px!important;font-size:5.5pt!important;
+    border-left:none!important;border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
+  }
+  .confidential{font-size:5pt!important;padding:1px 6px!important}
+  .wrap{padding:5mm 10mm 8mm 10mm!important}
 
-  /* ── SECTION : overflow visible pour permettre la fragmentation ── */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important}
-  .sec-body{overflow:visible!important;padding:6px 10px!important}
-  .sec-hdr{padding:5px 10px!important}
+  /* ── SECTION ── */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
+  .sec-body{overflow:visible!important;padding:7px 6px!important}
+  .sec-hdr{padding:5px 10px!important;break-after:avoid!important;page-break-after:avoid!important}
   .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
   .sec-ttl{font-size:8pt!important}
   .sec-sub{font-size:7pt!important}
 
-  /* ── SETUP CARD : overflow visible, anti-coupure maintenu ── */
-  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:4px!important;
-         break-inside:avoid!important;page-break-inside:avoid!important}
-  .setup-hdr{padding:5px 10px!important;gap:6px!important}
+  /* ── SETUP CARD : autoriser la fragmentation si trop grand, mais garder hdr+premier bloc solidaires ── */
+  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
+         break-inside:auto!important;page-break-inside:auto!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important;
+             break-before:avoid!important;page-break-before:avoid!important;
+             break-after:avoid!important;page-break-after:avoid!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
+  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+               break-before:avoid!important;page-break-before:avoid!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
   .setup-body{padding:6px 10px!important}
-  .pair{font-size:12px!important}
+  .pair{font-size:12.5px!important}
   .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
   .scen-lbl{font-size:7pt!important}
   .cluster-tag{font-size:7pt!important}
 
-  /* ── GRILLES DE FACTEURS & MÉTRIQUES : moins de padding ── */
-  .factor-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
+  /* ── GRILLES ── */
   .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .factor-val{font-size:9pt!important}
-  .metrics-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
-                break-inside:avoid!important;page-break-inside:avoid!important}
+  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .metric-val{font-size:9pt!important}
-
-  /* ── GRILLE PRIX (entry/SL/TP) ── */
-  .px-grid{gap:3px!important;margin-bottom:4px!important;
-           break-inside:avoid!important;page-break-inside:avoid!important}
-  .px-card{padding:4px 6px!important}
+  .px-grid{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .px-card{padding:4px 7px!important}
   .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
-  .px-val{font-size:10pt!important}
+  .px-val{font-size:10.5pt!important}
   .px-sub{font-size:6.5pt!important;margin-top:1px!important}
 
-  /* ── RATIONALE & AUDIT : compacts ── */
-  .rationale{padding:4px 7px!important;margin-bottom:4px!important;font-size:6.5pt!important;
-             break-inside:avoid!important;page-break-inside:avoid!important}
+  /* ── RATIONALE & AUDIT ── */
+  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
-  .audit-block{padding:4px 7px!important;margin-top:4px!important;font-size:5.8pt!important;
-               line-height:1.28!important;break-inside:avoid!important;page-break-inside:avoid!important}
-  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
-  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
-           break-inside:avoid!important;page-break-inside:avoid!important}
-  .flags-row{gap:4px!important;margin-bottom:5px!important;
-             break-inside:avoid!important;page-break-inside:avoid!important}
+  .flags-row{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .flag{font-size:6.5pt!important;padding:1px 5px!important}
-  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;
-          break-inside:avoid!important;page-break-inside:avoid!important}
+  .cap-note{font-size:6.5pt!important;margin-bottom:4px!important}
+  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{font-size:6.5pt!important;padding:1px 5px!important}
+  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
+  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
 
-  /* ── SECTION 2 (éliminés) : saut de page propre ── */
+  /* ── SECTION 2 ── */
   .section + .section{break-before:page!important;page-break-before:always!important}
-  .sec-hdr,.setup-hdr{break-after:avoid!important;page-break-after:avoid!important}
   .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
-  .elim{padding:5px 8px!important;margin-bottom:4px!important}
+  .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .elim-pair{font-size:8pt!important;min-width:60px!important}
   .elim-txt{font-size:7pt!important}
 
-  /* ── TABLE des rejets ── */
+  /* ── TABLE ── */
   table{font-size:7pt!important}
   thead th{padding:4px 7px!important;font-size:6.5pt!important}
   tbody td{padding:3px 7px!important}
@@ -1731,53 +1806,48 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* Bandeau meta-info : caché écran, affiché en print.
-     Avant setup 1 : sous le sec-hdr (contexte initial).
-     Avant setups 3,5 : repère de continuation en haut de nouvelle page. */
-  .print-ctx-bar{
-    display:block!important;
-    font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
-    color:var(--sec)!important;background:var(--card)!important;
-    border-top:none!important;border-left:none!important;border-right:none!important;
-    border-bottom:1px solid var(--border)!important;
-    padding:2px 10px!important;margin-bottom:5px!important;
-    letter-spacing:.04em!important;
-  }
-  /* ctx-bar avec page-break : force une nouvelle page AVANT le bandeau */
-  .print-ctx-bar.print-pb{
-    break-before:page!important;
-    page-break-before:always!important;
-    margin-top:0!important;
-  }
-  /* Audit trail compact (dernière carte) : tout sur 2 lignes max */
-  .audit-compact{
-    white-space:normal!important;
-    line-height:1.25!important;
-  }
-  /* Blackout grid compact en print */
+  /* ── DIVERS ── */
+  .print-ctx-bar{display:none!important}
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
-  .sus-item{padding:3px 7px!important}
+  .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
-  .footer{display:none!important}
+  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
   #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
-/* Context bar : masqué écran, repère contextuel print pages 2+ */
+/* Context bar : masqué écran, repère contextuel print page 1 uniquement */
 .print-ctx-bar{display:none}
+/* Bouton PDF flottant — masqué en print */
+#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
+#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 /* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
 .sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
 .sus-item-txt{font-size:9px;color:var(--muted)}
-#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
-#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
+
 </style>
 </head>
 <body>
+<script>
+function downloadHtml(){
+  const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
+  const blob=new Blob([html],{type:'text/html'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.html";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+</script>
 <div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
 <div id="page">
+<div class="wrap">
+<div class="page-top">
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
@@ -1793,19 +1863,19 @@ tbody td{padding:5px 10px;vertical-align:middle}
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
-<div class="wrap">
+</div><!-- /.page-top -->
 
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
+  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
   {% set cv = s.conviction.value|lower %}
   {% set fs = s.factor_scores %}
-  {% if loop.first %}<div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>{% elif loop.index is odd %}<div class="print-ctx-bar print-pb">§{{loop.index}}/{{n_setups}} &nbsp;·&nbsp; {{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong></div>{% endif %}
   <div class="setup {{cv}}">
     <div class="setup-hdr {{dc}}">
       <span class="pair">{{s.symbol}}</span>
@@ -1844,11 +1914,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
       {% if s.capped_reason %}<div class="cap-note">Plafond conviction appliqué : {{s.capped_reason}}</div>{% endif %}
       <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
       <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
-      {% if loop.last %}
-      <div class="audit-block audit-compact"><strong>Audit Trail</strong>{{s.sl_detail}} &nbsp;|&nbsp; {{s.rr_detail}} &nbsp;|&nbsp; score={{ '%.4f'|format(fs.absolute_mean) }} · q={{ '%.4f'|format(fs.quantile) }} · ATR={{s.atr_source}} · cluster={{s.cluster}}</div>
-      {% else %}
       <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
-      {% endif %}
     </div>
   </div>
   {% endfor %}
@@ -1914,9 +1980,15 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         elif calendar.proximity:
             risk = "Medium"
     theme_str = ", ".join(f"{k} {v}" for k, v in (themes.strong.items() if themes else []))
-    sr_degraded = all(s.rr_synthetic for s in setups) if setups else False
+    # Évaluation granulaire de la qualité SR (pas binaire)
+    sr_entry_zone = sum(1 for s in setups if s.entry_type == "Limit")
+    sr_tp1_zone = sum(1 for s in setups if not s.rr_synthetic)
+    # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
+    sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
+    date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
     return _get_template().render(
         date_hdr=clock.date_hdr,
+        date_hdr_file=date_hdr_file,
         n_setups=len(setups),
         n_passed=n_passed,
         n_total=meta.assets_count or (n_passed + len(eliminated)),
@@ -1926,32 +1998,35 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     )
 
 
-def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None) -> str:
+def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
+               fallback_html: Optional[str] = None) -> str:
     """Génère un PDF natif CALIBRÉ depuis le HTML via WeasyPrint.
 
     WeasyPrint applique le bloc @page + @media print du template (A4, marges
     uniformes, en-tête/pied paginés, anti-coupure des cartes), produisant un
     document proportionnel et professionnel — sans dépendre du print() navigateur.
 
-    Repli sûr : si WeasyPrint n'est pas installé, on écrit le HTML calibré et on
-    informe l'utilisateur d'utiliser le bouton "Télécharger PDF" (qui applique le
-    même CSS @page). Jamais bloquant.
+    Repli sûr : si WeasyPrint n'est pas installé, passez fallback_html pour
+    écrire un repli HTML explicite. Jamais bloquant.
     """
     if not _HAS_WEASYPRINT:
-        logger.warning(
-            "WeasyPrint indisponible — PDF non généré. "
-            "Installez-le (`pip install weasyprint`) pour un PDF natif calibré, "
-            "ou utilisez le bouton « Télécharger PDF » du HTML (même CSS @page).")
-        fallback_html = pdf_path
-        if fallback_html.lower().endswith(".pdf"):
-            fallback_html = fallback_html[:-4] + ".html"
+        if fallback_html is None:
+            logger.error(
+                "WeasyPrint indisponible — PDF non généré. "
+                "Installez-le (`pip install weasyprint`) ou passez fallback_html=... "
+                "pour un repli HTML explicite.")
+            return pdf_path
         with open(fallback_html, "w", encoding="utf-8") as f:
             f.write(html)
         logger.info("HTML calibré écrit en repli: %s", fallback_html)
         return fallback_html
     if base_url is None:
         base_url = os.getcwd()
-    _WeasyHTML(string=html, base_url=base_url).write_pdf(pdf_path)
+    # FIX-W61 : BytesIO intermédiaire pour compatibilité WeasyPrint 61+ (pydyf)
+    buf = io.BytesIO()
+    _WeasyHTML(string=html, base_url=base_url).write_pdf(buf)
+    with open(pdf_path, "wb") as f:
+        f.write(buf.getvalue())
     logger.info("PDF natif calibré généré: %s", pdf_path)
     return pdf_path
 
