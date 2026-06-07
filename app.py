@@ -267,17 +267,29 @@ if "report_html" in st.session_state:
         _report_date = datetime.now().strftime("%Y.%m.%d")
     _base_name = f"BLUESTAR FX Desk_Signal Report_{_report_date}"
 
-    st.download_button(
-        label="Telecharger HTML",
-        data=html,
-        file_name=f"{_base_name}.html",
-        mime="text/html",
-        use_container_width=True,
-    )
+    dl_col1, dl_col2 = st.columns(2)
 
-    if st.session_state.get("report_pdf_err"):
-        err = st.session_state["report_pdf_err"]
-        st.error(f"PDF err : {err[:100]}")
+    with dl_col1:
+        st.download_button(
+            label="Telecharger HTML",
+            data=html,
+            file_name=f"{_base_name}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+    with dl_col2:
+        if _HAS_WEASYPRINT and st.session_state.get("report_pdf"):
+            st.download_button(
+                label="📥 Telecharger PDF",
+                data=st.session_state["report_pdf"],
+                file_name=f"{_base_name}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        elif st.session_state.get("report_pdf_err"):
+            err = st.session_state["report_pdf_err"]
+            st.error(f"PDF err : {err[:100]}")
 
 else:
     st.info("Upload le fichier merged JSON pour lancer le pipeline.")
