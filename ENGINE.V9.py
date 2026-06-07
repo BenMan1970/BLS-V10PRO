@@ -1707,6 +1707,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
 /* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD ═══════════════ */
 @page{size:A4 portrait;margin:0}
 
+#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
+#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
@@ -1815,6 +1817,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   p,li{orphans:3;widows:3}
   .footer{display:block!important;padding:5px 5mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
   a[href]:after{content:""!important}
+  #pdf-fab{display:none!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
 .print-ctx-bar{display:none}
@@ -1841,6 +1844,7 @@ function downloadHtml(){
   URL.revokeObjectURL(a.href);
 }
 </script>
+<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
 <div id="page">
 <div class="wrap">
 <div class="page-top">
