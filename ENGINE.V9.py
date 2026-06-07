@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import logging
 import math
@@ -46,13 +45,17 @@ logger = logging.getLogger("bluestar.v10")
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
-# FIX-E01: import merge_appbackup supprimé (module inexistant, _HAS_UPSTREAM inutilisé)
+try:  # pragma: no cover
+    from merge_appbackup import Direction as _UpstreamDirection  # noqa: F401
+    _HAS_UPSTREAM = True
+except Exception:
+    _HAS_UPSTREAM = False
 
 # Optional PDF backend — native, calibrated rendering. Never blocking at import.
 try:  # pragma: no cover
-    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
+    from weasyprint import HTML as _WeasyHTML  # type: ignore
     _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+except Exception:
     _HAS_WEASYPRINT = False
 
 
@@ -79,7 +82,7 @@ class EventTier(str, Enum):
 
 
 class GateCode(str, Enum):
-    PASS = "PASS"  # nosec B105 — état métier Enum, pas un mot de passe
+    PASS = "PASS"
     G0_SCHEMA_ASSET_ERROR = "SCHEMA_ASSET_ERROR"
     G1_CAL_BLACKOUT = "CAL_BLACKOUT"
     G2_LOW_QUALITY = "LOW_QUALITY"
@@ -135,13 +138,13 @@ def _safe_float(v: Any) -> Optional[float]:
         if v is None:
             return None
         f = float(v)
-        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself
+        return f if f == f and f not in (float("inf"), float("-inf")) else None
     except (TypeError, ValueError):
         return None
 
 
 def _clamp01(x: float) -> float:
-    if x != x:  # pylint: disable=comparison-with-itself
+    if x != x:  # NaN
         return 0.0
     return max(0.0, min(1.0, x))
 
@@ -748,7 +751,7 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
-def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
+def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
@@ -762,7 +765,7 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
+def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -837,7 +840,7 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     return out
 
 
-def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument
+def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:
     """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
     Quantile NEVER influences conviction; only ordering here. Symbol is the
     final stable secondary key for bit-for-bit reproducibility."""
@@ -997,7 +1000,7 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
-def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument
+def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
@@ -1080,8 +1083,8 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
 def compute_rr(entry: float, sl: float, tp1: float, tp2: Optional[float],
                tp1_syn: bool, tp2_syn: bool) -> tuple[float, str]:
     risk = abs(entry - sl)
-    if risk <= 0 or math.isclose(risk, 0.0, abs_tol=1e-12):
-        return 0.0, "Risk ~0, invalid"
+    if risk <= 0:
+        return 0.0, "Risk=0, invalid"
     r1 = abs(tp1 - entry)
     if tp2 is None:
         rr = r1 / risk
@@ -1148,7 +1151,7 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "NO_ATR"
         setup.reject_detail = "ATR ≤ 0"
         return setup
-    if setup.rr < cfg.RR_MIN or setup.rr > cfg.RR_MAX:
+    if not (cfg.RR_MIN <= setup.rr <= cfg.RR_MAX):
         setup.reject_code = "RR_OUT_OF_RANGE"
         setup.reject_detail = f"RR {setup.rr} ∉ [{cfg.RR_MIN},{cfg.RR_MAX}]"
         return setup
@@ -1318,9 +1321,7 @@ def _htf_aligned(a: CanonicalAsset) -> bool:
 
 
 def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
-               flags: list[Flag], lv: Optional[LevelBundle] = None) -> str:
-    if lv is None:
-        lv = build_levels(a)
+               flags: list[Flag], lv: LevelBundle) -> str:
     parts = [f"Score absolu {fv.absolute_mean:.2f}"]
     top = sorted(fv.present, key=lambda n: -fv.get(n))[:3]
     parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}" for n in top))
@@ -1336,11 +1337,9 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     return " · ".join(parts)
 
 
-def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument
-                cal: Optional[CalendarSets], cfg: V4Config,
-                lv: Optional[LevelBundle] = None) -> SetupV4:
-    if lv is None:
-        lv = build_levels(a, cfg)
+def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
+                cal: Optional[CalendarSets], cfg: V4Config) -> SetupV4:
+    lv = build_levels(a, cfg)
     cal_status, cal_note = _compute_cal_status(a, cal)
     fs = FactorScores(
         f1_hwa=round(fv.get("f1_hwa"), 4),
@@ -1378,73 +1377,6 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
     )
 
 
-
-def _pipeline_factors_and_grades(
-    universe: Universe,
-    themes: MarketThemes,
-    cal_sets: CalendarSets,
-    clock: Clock,
-    config: V4Config,
-) -> tuple[list[FactorVector], list[SetupV4], dict[str, LevelBundle]]:
-    """Etapes 5-7 : factor vectors, drafts, quantiles, contradictions, grade."""
-    vectors: list[FactorVector] = []
-    drafts: list[SetupV4] = []
-    lv_cache: dict[str, LevelBundle] = {}
-    for a in universe.passed:
-        fv = build_factor_vector(a, themes, cal_sets, clock, config)
-        vectors.append(fv)
-        lv = build_levels(a, config)
-        lv_cache[a.symbol] = lv
-        drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
-    # cross-section quantiles
-    quantiles = compute_quantiles(vectors)
-    for s in drafts:
-        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
-    # contradictions + grade
-    asset_by_sym = {a.symbol: a for a in universe.passed}
-    fv_by_sym = {v.symbol: v for v in vectors}
-    for s in drafts:
-        a = asset_by_sym[s.symbol]
-        fv = fv_by_sym[s.symbol]
-        flags = detect_contradictions(a, fv, themes, cal_sets, config)
-        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
-        cap, cap_reason = apply_caps(a, fv, config)
-        if cap_reason:
-            s.capped_reason = cap_reason
-        s.conviction = grade(fv.absolute_mean, flags, cap, config)
-        s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
-    return vectors, drafts, lv_cache
-
-
-def _pipeline_rank_and_diversify(
-    drafts: list[SetupV4],
-    themes: MarketThemes,
-    config: V4Config,
-) -> tuple[list[SetupV4], list[SetupV4], list[SetupV4]]:
-    """Etapes 8-10 : preflight, rank, diversify. Retourne (final, preflight_rejects, ranked)."""
-    for s in drafts:
-        preflight(s, config)
-    valid = [s for s in drafts if s.reject_code is None]
-    preflight_rejects = [s for s in drafts if s.reject_code is not None]
-    ranked = rank_setups(valid, config)
-    final = diversify(ranked, themes, config)
-    return final, preflight_rejects, ranked
-
-
-def _pipeline_collect_eliminated(
-    universe: Universe,
-    preflight_rejects: list[SetupV4],
-    ranked: list[SetupV4],
-    final: list[SetupV4],
-) -> list[Eliminated]:
-    """Etape 11 : collecte des assets elimines (gates + preflight + non-representants)."""
-    eliminated = _collect_eliminated(universe)
-    eliminated.extend(_eliminated_from_setups(preflight_rejects))
-    final_syms = {s.symbol for s in final}
-    non_reps = [s for s in ranked if s.symbol not in final_syms]
-    eliminated.extend(_eliminated_from_setups(non_reps))
-    return eliminated
-
 def run_pipeline(
     merged_path: str,
     calendar_path: Optional[str] = None,
@@ -1461,12 +1393,6 @@ def run_pipeline(
     calendar_data = load_calendar(calendar_json_path)
     clock = Clock.from_meta(meta.generated_at)
 
-    # Auto-nommage si pas de chemin explicite
-    if output_path is None:
-        output_path = report_filename(meta.generated_at, "html")
-    if pdf_path is None:
-        pdf_path = report_filename(meta.generated_at, "pdf")
-
     # 2 — calendar buckets
     cal_sets = calendar_data.bucket(clock.now_utc)
 
@@ -1476,17 +1402,51 @@ def run_pipeline(
     # 4 — themes
     themes = detect_currency_themes(assets, config)
 
-    # 5-7 — factor vectors, drafts, grades
-    vectors, drafts, lv_cache = _pipeline_factors_and_grades(
-        universe, themes, cal_sets, clock, config)
+    # 5 — factor vectors + drafts (levels)
+    vectors: list[FactorVector] = []
+    drafts: list[SetupV4] = []
+    for a in universe.passed:
+        fv = build_factor_vector(a, themes, cal_sets, clock, config)
+        vectors.append(fv)
+        drafts.append(_make_draft(a, fv, themes, cal_sets, config))
 
-    # 8-10 — preflight, rank, diversify
-    final, preflight_rejects, ranked = _pipeline_rank_and_diversify(
-        drafts, themes, config)
+    # 6 — cross-section quantiles (tie-break/diversif only)
+    quantiles = compute_quantiles(vectors)
+    for s in drafts:
+        s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
+
+    # 7 — contradictions + grade (vetos -> caps -> grid)
+    asset_by_sym = {a.symbol: a for a in universe.passed}
+    fv_by_sym = {v.symbol: v for v in vectors}
+    for s in drafts:
+        a = asset_by_sym[s.symbol]
+        fv = fv_by_sym[s.symbol]
+        flags = detect_contradictions(a, fv, themes, cal_sets, config)
+        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
+        cap, cap_reason = apply_caps(a, fv, config)
+        if cap_reason:
+            s.capped_reason = cap_reason
+        s.conviction = grade(fv.absolute_mean, flags, cap, config)
+        s.rationale = _rationale(a, fv, themes, flags, build_levels(a, config))
+
+    # 8 — preflight (before rank)
+    for s in drafts:
+        preflight(s, config)
+    valid = [s for s in drafts if s.reject_code is None]
+    preflight_rejects = [s for s in drafts if s.reject_code is not None]
+
+    # 9 — rank (absolute_mean DESC + tie-break)
+    ranked = rank_setups(valid, config)
+
+    # 10 — diversify (cluster -> representative -> cap -> top N)
+    final = diversify(ranked, themes, config)
 
     # 11 — collect eliminated
-    eliminated = _pipeline_collect_eliminated(
-        universe, preflight_rejects, ranked, final)
+    eliminated = _collect_eliminated(universe)
+    eliminated.extend(_eliminated_from_setups(preflight_rejects))
+    final_syms = {s.symbol for s in final}
+    non_reps = [s for s in ranked if s.symbol not in final_syms]
+    eliminated.extend(_eliminated_from_setups(non_reps))
 
     # 12 — render (HTML)
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
@@ -1496,11 +1456,7 @@ def run_pipeline(
             f.write(html)
     # 12b — render (PDF natif calibré) — optionnel, jamais bloquant
     if pdf_path:
-        # FIX-BUG: passer fallback_html explicitement (régression V10 vs V9 — sans
-        # cet argument, render_pdf logue une erreur et ne produit rien du tout
-        # quand WeasyPrint est absent, alors que le V9 écrivait un repli HTML).
-        _fb = pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf") else pdf_path + ".html"
-        render_pdf(html, pdf_path, fallback_html=_fb)
+        render_pdf(html, pdf_path)
     return html
 
 
@@ -1535,23 +1491,11 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
-    # FIX-E02: vérification version schéma merge
-    if meta.version:
-        try:
-            min_version = "3.4.0"
-            meta_v = tuple(int(x) for x in meta.version.split(".")[:3])
-            min_v = tuple(int(x) for x in min_version.split(".")[:3])
-            if meta_v < min_v:
-                logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)", meta.version, min_version)
-        except (ValueError, AttributeError):
-            logger.warning("Version schéma non parseable: %s", meta.version)
-    else:
-        logger.warning("Version schéma absente dans le merge")
     assets: dict[str, CanonicalAsset] = {}
     for sym, a in (raw.get("assets") or {}).items():
         try:
             assets[sym] = CanonicalAsset.model_validate(a)
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # never blocking — degraded mode
             logger.warning("asset %s skipped: %s", sym, exc)
     return meta, assets
 
@@ -1564,14 +1508,6 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     data = CalendarData.model_validate_json(raw)
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
-
-def report_filename(generated_at: datetime, ext: str) -> str:
-    """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
-    if generated_at.tzinfo is None:
-        generated_at = generated_at.replace(tzinfo=timezone.utc)
-    local = generated_at.astimezone(timezone(timedelta(hours=1)))
-    return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
-
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1602,7 +1538,7 @@ _INLINE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}</title>
+<title>BLUESTAR FX CASCADE – {{date_hdr}}</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
 :root{
@@ -1702,102 +1638,112 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .briefing-sub{font-size:8.5px;color:var(--sec);font-family:var(--mono);margin-top:4px;letter-spacing:.02em}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
-.page-top{display:block}
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD ═══════════════ */
-@page{size:A4 portrait;margin:0}
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ (v10.2 corrigé) ═══════════════
+   Levier 1 : @page A4 portrait, marges uniformes, en-tête/pied paginés (compteur).
+   Levier 2 : largeur de contenu = zone imprimable, échelle pt stable (pas de scale).
+   Levier 3 : break-inside:avoid sur .setup / grilles / lignes de table + orphans/widows.
+   PRINCIPE CLÉ : AUCUN saut de page forcé sur les setups. La pagination auto
+   remplit chaque page au maximum ; break-inside:avoid garantit qu'aucune carte
+   n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
+@page{
+  size:A4 portrait;
+  margin:13mm 11mm 14mm 11mm;
+  @top-center{
+    content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
+  }
+  @bottom-left{
+    content:"CONFIDENTIEL · USAGE INTERNE · BLUESTAR v10 HYBRID V4";
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
+  }
+  @bottom-right{
+    content:"Page " counter(page) " / " counter(pages);
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
+  }
+}
+/* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
+@page:first{ @top-center{content:""} }
 
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
-  html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
-  body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
-  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
+  html,body{background:#fff!important}
+  /* Base typographique : densité régulière, ~2 setups par page A4. */
+  body{font-size:7.4pt!important;line-height:1.4!important}
+  #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
+  .wrap{padding:0 2px!important}
 
-  /* ── EN-TÊTE : dans le flux du wrap, margin négatif pour full-bleed ── */
-  .page-top{
-    break-inside:avoid!important;break-after:avoid!important;
-    margin:-5mm -10mm 4mm -10mm!important;
-  }
-  .page-header{
-    border-radius:0!important;box-shadow:none!important;
-    padding:3px 10mm!important;min-height:0!important;
-    border-left:none!important;border-right:none!important;border-top:none!important;
-    border-bottom:1px solid var(--border)!important;
-  }
-  .page-header::after{display:none!important}
-  .header-left{gap:6px!important}
-  .sys-name{font-size:10px!important;line-height:1!important}
-  .sys-label{font-size:5pt!important;letter-spacing:.1em!important}
-  .sys-desc{font-size:5pt!important;margin-top:0!important}
-  .briefing-label{font-size:5pt!important}
-  .briefing-sub{font-size:5pt!important;margin-top:1px!important}
-  .logo-marker{width:16px!important;height:16px!important;padding:1px!important}
-  .logo-marker svg{width:14px!important;height:14px!important}
-  .header-right{padding-left:8px!important}
-  .page-subbar{
-    padding:2px 10mm!important;gap:6px!important;font-size:5.5pt!important;
-    border-left:none!important;border-right:none!important;
-    border-bottom:1px solid var(--border)!important;
-  }
-  .confidential{font-size:5pt!important;padding:1px 6px!important}
-  .wrap{padding:5mm 10mm 8mm 10mm!important}
+  /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
+  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:7px 12px!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
+  .sys-name{font-size:15px!important}
+  .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
+  .logo-marker{width:24px!important;height:24px!important}
+  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
 
-  /* ── SECTION ── */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
+  /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:none!important}
   .sec-body{overflow:visible!important;padding:7px 6px!important}
-  .sec-hdr{padding:5px 10px!important;break-after:avoid!important;page-break-after:avoid!important}
+  .sec-hdr{padding:5px 10px!important;border:1px solid var(--border)!important;border-radius:4px!important;
+           break-after:avoid!important;page-break-after:avoid!important}
   .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
   .sec-ttl{font-size:8pt!important}
   .sec-sub{font-size:7pt!important}
 
-  /* ── SETUP CARD : autoriser la fragmentation si trop grand, mais garder hdr+premier bloc solidaires ── */
+  /* ── SETUP CARD : entière, jamais coupée, AUCUN saut forcé ── */
   .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
-         break-inside:auto!important;page-break-inside:auto!important}
-  .setup-hdr{padding:5px 10px!important;gap:6px!important;
-             break-before:avoid!important;page-break-before:avoid!important;
-             break-after:avoid!important;page-break-after:avoid!important;
-             break-inside:avoid!important;page-break-inside:avoid!important}
-  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
-               break-before:avoid!important;page-break-before:avoid!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
+         break-inside:avoid!important;page-break-inside:avoid!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important;break-after:avoid!important;page-break-after:avoid!important}
   .setup-body{padding:6px 10px!important}
   .pair{font-size:12.5px!important}
   .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
   .scen-lbl{font-size:7pt!important}
   .cluster-tag{font-size:7pt!important}
 
-  /* ── GRILLES ── */
+  /* ── GRILLES FACTEURS / MÉTRIQUES : solidaires de leur carte ── */
+  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
   .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .factor-val{font-size:9pt!important}
-  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+                break-inside:avoid!important;page-break-inside:avoid!important}
   .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .metric-val{font-size:9pt!important}
-  .px-grid{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+
+  /* ── GRILLE PRIX ── */
+  .px-grid{gap:4px!important;margin-bottom:5px!important;
+           break-inside:avoid!important;page-break-inside:avoid!important}
   .px-card{padding:4px 7px!important}
   .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .px-val{font-size:10.5pt!important}
   .px-sub{font-size:6.5pt!important;margin-top:1px!important}
 
-  /* ── RATIONALE & AUDIT ── */
-  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  /* ── RATIONALE & AUDIT : compacts, solidaires ── */
+  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
   .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
-  .flags-row{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .flags-row{gap:4px!important;margin-bottom:5px!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
   .flag{font-size:6.5pt!important;padding:1px 5px!important}
   .cap-note{font-size:6.5pt!important;margin-bottom:4px!important}
-  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
+           break-inside:avoid!important;page-break-inside:avoid!important}
   .cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{font-size:6.5pt!important;padding:1px 5px!important}
-  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;
+               line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
-  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;
+          break-inside:avoid!important;page-break-inside:avoid!important}
 
-  /* ── SECTION 2 ── */
+  /* ── SECTION 2 (éliminés) : démarre proprement sur une nouvelle page ── */
   .section + .section{break-before:page!important;page-break-before:always!important}
   .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
   .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .elim-pair{font-size:8pt!important;min-width:60px!important}
   .elim-txt{font-size:7pt!important}
 
-  /* ── TABLE ── */
+  /* ── TABLE des rejets : en-tête répété, lignes insécables ── */
   table{font-size:7pt!important}
   thead th{padding:4px 7px!important;font-size:6.5pt!important}
   tbody td{padding:3px 7px!important}
@@ -1806,14 +1752,25 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* ── DIVERS ── */
-  .print-ctx-bar{display:none!important}
+  /* ── BANDEAU CONTEXTE PRINT : repère de cadrage UNIQUE (sous sec-hdr §1) ── */
+  .print-ctx-bar{
+    display:block!important;
+    font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
+    color:var(--sec)!important;background:var(--card)!important;
+    border:1px solid var(--border)!important;border-radius:4px!important;
+    padding:3px 10px!important;margin-bottom:6px!important;
+    letter-spacing:.04em!important;
+    break-inside:avoid!important;page-break-inside:avoid!important;
+    break-after:avoid!important;page-break-after:avoid!important;
+  }
+  /* Blackout grid compact en print */
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
   .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
-  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
+  .footer{display:none!important}
+  #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
@@ -1823,26 +1780,13 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
 .sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
 .sus-item-txt{font-size:9px;color:var(--muted)}
-
+#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
+#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 </style>
 </head>
 <body>
-<script>
-function downloadHtml(){
-  const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
-  const blob=new Blob([html],{type:'text/html'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.html";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(a.href);
-}
-</script>
+<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
 <div id="page">
-<div class="wrap">
-<div class="page-top">
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
@@ -1858,7 +1802,7 @@ function downloadHtml(){
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
-</div><!-- /.page-top -->
+<div class="wrap">
 
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
@@ -1978,12 +1922,11 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     # Évaluation granulaire de la qualité SR (pas binaire)
     sr_entry_zone = sum(1 for s in setups if s.entry_type == "Limit")
     sr_tp1_zone = sum(1 for s in setups if not s.rr_synthetic)
+    sr_tp2_zone = sum(1 for s in setups if s.tp2 and not s.rr_synthetic)
     # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
     sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
-    date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
     return _get_template().render(
         date_hdr=clock.date_hdr,
-        date_hdr_file=date_hdr_file,
         n_setups=len(setups),
         n_passed=n_passed,
         n_total=meta.assets_count or (n_passed + len(eliminated)),
@@ -1993,35 +1936,32 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     )
 
 
-def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
-               fallback_html: Optional[str] = None) -> str:
+def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None) -> str:
     """Génère un PDF natif CALIBRÉ depuis le HTML via WeasyPrint.
 
     WeasyPrint applique le bloc @page + @media print du template (A4, marges
     uniformes, en-tête/pied paginés, anti-coupure des cartes), produisant un
     document proportionnel et professionnel — sans dépendre du print() navigateur.
 
-    Repli sûr : si WeasyPrint n'est pas installé, passez fallback_html pour
-    écrire un repli HTML explicite. Jamais bloquant.
+    Repli sûr : si WeasyPrint n'est pas installé, on écrit le HTML calibré et on
+    informe l'utilisateur d'utiliser le bouton "Télécharger PDF" (qui applique le
+    même CSS @page). Jamais bloquant.
     """
     if not _HAS_WEASYPRINT:
-        if fallback_html is None:
-            logger.error(
-                "WeasyPrint indisponible — PDF non généré. "
-                "Installez-le (`pip install weasyprint`) ou passez fallback_html=... "
-                "pour un repli HTML explicite.")
-            return pdf_path
+        logger.warning(
+            "WeasyPrint indisponible — PDF non généré. "
+            "Installez-le (`pip install weasyprint`) pour un PDF natif calibré, "
+            "ou utilisez le bouton « Télécharger PDF » du HTML (même CSS @page).")
+        fallback_html = pdf_path
+        if fallback_html.lower().endswith(".pdf"):
+            fallback_html = fallback_html[:-4] + ".html"
         with open(fallback_html, "w", encoding="utf-8") as f:
             f.write(html)
         logger.info("HTML calibré écrit en repli: %s", fallback_html)
         return fallback_html
     if base_url is None:
         base_url = os.getcwd()
-    # FIX-W61 : BytesIO intermédiaire pour compatibilité WeasyPrint 61+ (pydyf)
-    buf = io.BytesIO()
-    _WeasyHTML(string=html, base_url=base_url).write_pdf(buf)
-    with open(pdf_path, "wb") as f:
-        f.write(buf.getvalue())
+    _WeasyHTML(string=html, base_url=base_url).write_pdf(pdf_path)
     logger.info("PDF natif calibré généré: %s", pdf_path)
     return pdf_path
 
