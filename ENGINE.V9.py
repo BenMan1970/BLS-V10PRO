@@ -1693,9 +1693,9 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .page-header{background:linear-gradient(135deg,#F8FAFF 0%,#F0F4FE 100%);border:1px solid var(--border);border-radius:var(--rl) var(--rl) 0 0;display:flex;align-items:center;justify-content:space-between;padding:13px 24px;box-shadow:0 1px 4px rgba(13,31,78,.04),inset 0 1px 0 rgba(255,255,255,.8);position:relative}
 .page-header::after{content:'';position:absolute;bottom:0;left:24px;right:24px;height:2px;background:linear-gradient(90deg,var(--royal),var(--royal-dim),transparent);border-radius:2px}
 .header-left{display:flex;align-items:center;gap:14px}
-.logo-marker{width:34px;height:34px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--white);border:1px solid var(--border);border-radius:var(--r)}
+.logo-marker{width:42px;height:42px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--white);border:1px solid var(--border);border-radius:var(--r)}
 .sys-label{font-size:8.5px;letter-spacing:.3em;color:var(--royal-dim);font-family:var(--mono);font-weight:600;text-transform:uppercase}
-.sys-name{font-size:21px;font-weight:700;color:var(--dark);letter-spacing:-.02em;line-height:1.1;font-family:var(--mono)}
+.sys-name{font-size:26px;font-weight:700;color:var(--dark);letter-spacing:-.02em;line-height:1.1;font-family:var(--mono)}
 .sys-desc{font-size:8.5px;color:var(--muted);font-family:var(--mono);margin-top:2px;letter-spacing:.02em}
 .header-right{text-align:right;border-left:1px solid var(--border2);padding-left:18px}
 .briefing-label{font-size:10.5px;color:var(--royal);font-family:var(--mono);letter-spacing:.08em;font-weight:600;text-transform:uppercase}
@@ -1814,14 +1814,10 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
   .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
-  #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
 /* Context bar : masqué écran, repère contextuel print page 1 uniquement */
 .print-ctx-bar{display:none}
-/* Bouton PDF flottant — masqué en print */
-#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
-#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
 /* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
 .sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
@@ -1844,13 +1840,12 @@ function downloadHtml(){
   URL.revokeObjectURL(a.href);
 }
 </script>
-<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
 <div id="page">
 <div class="wrap">
 <div class="page-top">
 <div class="page-header">
   <div class="header-left">
-    <div class="logo-marker"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
+    <div class="logo-marker"><svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
     <div><div class="sys-label">BLUESTAR SYSTEM</div><div class="sys-name">BLUESTAR</div><div class="sys-desc">FX INSTITUTIONAL DESK · v10 HYBRID V4</div></div>
   </div>
   <div class="header-right"><div class="briefing-label">FX CASCADE · TRADER</div><div class="briefing-sub">{{date_hdr}}</div></div>
