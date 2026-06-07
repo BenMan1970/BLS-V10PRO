@@ -609,6 +609,13 @@ _XCTX_BB = MappingProxyType({"squeeze": 1.0, "normal": 0.6, "expansion": 0.3, ""
 
 _EXT_STATUSES = ("extreme_overbought", "extreme_oversold", "overbought", "oversold")
 
+# RSI divergence — poids par timeframe (somme théorique max = 0.74).
+# Seules les divergences confirmées (div_confirmed=True) contraires à la
+# direction du trade entrent en compte. Cap final à 0.40 sur le score F2.
+_DIV_TF_WEIGHT: Mapping[str, float] = MappingProxyType(
+    {"W1": 0.35, "D1": 0.20, "H4": 0.12, "H1": 0.05, "M15": 0.02}
+)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 7 — THEME DETECTION  (extended from v9 with cohesion)
@@ -653,6 +660,43 @@ def _rsi_status(a: CanonicalAsset, tf: str) -> str:
     if isinstance(d, dict):
         return str(d.get("status") or "").lower()
     return ""
+
+
+def _divergence_penalty(a: CanonicalAsset) -> float:
+    """Retourne une pénalité [0.0, 0.40] représentant la pression des divergences RSI
+    confirmées contraires à la direction du trade.
+
+    Règles :
+    - Seules les entrées avec ``div_confirmed == True`` sont prises en compte.
+    - Seules les divergences *contraires* à la direction MTF pénalisent
+      (une divergence dans le sens du trade est neutre pour F2).
+    - Le poids est proportionnel à ``div_strength_score × div_confidence_score``
+      et pondéré par le timeframe (W1 > D1 > H4 > H1 > M15).
+    - Le résultat est capé à 0.40 pour ne jamais annuler le signal à lui seul.
+    - Si MTF absent ou aucune divergence confirmée contraire : retourne 0.0.
+    """
+    if a.mtf is None:
+        return 0.0
+    direction = a.mtf.direction
+    penalty = 0.0
+    for tf, w in _DIV_TF_WEIGHT.items():
+        d = a.rsi_by_tf.get(tf) or a.rsi_by_tf.get(tf.upper()) or a.rsi_by_tf.get(tf.lower())
+        if not isinstance(d, dict):
+            continue
+        if not d.get("div_confirmed"):
+            continue
+        div_dir = str(d.get("divergence") or "").lower()
+        # Divergence contraire = bearish sur trade bullish, ou bullish sur trade bearish
+        is_contra = (
+            (direction is Direction.BULLISH and div_dir == "bearish")
+            or (direction is Direction.BEARISH and div_dir == "bullish")
+        )
+        if not is_contra:
+            continue
+        strength = _safe_float(d.get("div_strength_score")) or 0.0
+        confidence = _safe_float(d.get("div_confidence_score")) or 0.0
+        penalty += w * strength * confidence
+    return min(penalty, 0.40)
 
 
 def _aligned_trigger(a: CanonicalAsset) -> Optional[StructureEventView]:
@@ -706,7 +750,12 @@ def f2_rmg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     grad = fast - slow
     signed = grad if a.mtf.direction is Direction.BULLISH else -grad
     score = _clamp01(0.5 + 0.5 * math.tanh(signed / cfg.RMG_SCALE))
+    # Pénalité divergence : divergences confirmées contraires à la direction
+    div_penalty = _divergence_penalty(a)
+    score = _clamp01(score - div_penalty)
     detail = f"RMG fast={fast:.1f} slow={slow:.1f} grad={grad:.1f} signed={signed:.1f}"
+    if div_penalty > 0.0:
+        detail += f" | div_penalty={div_penalty:.3f}"
     return ScoredFactor("f2_rmg", grad, score, False, detail)
 
 
