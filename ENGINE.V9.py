@@ -418,7 +418,9 @@ class FactorScores(BaseModel):
     f5_xctx: float = 0.0
     f6_theme: float = 0.0
     f7_macro: float = 0.0
-    absolute_mean: float = 0.0
+    absolute_mean: float = 0.0        # score post-decay (utilisé pour conviction + ranking)
+    absolute_mean_raw: float = 0.0    # score pré-decay (audit uniquement)
+    decay_factor: float = 1.0         # multiplicateur appliqué [DECAY_FLOOR, 1.0]
     quantile: float = 0.0
     missing: list[str] = Field(default_factory=list)
     details: dict[str, str] = Field(default_factory=dict)
@@ -565,6 +567,9 @@ class V4Config:
     BBB_MIN: float = 0.42
     BB_MIN: float = 0.30
     MACRO_CAP_RISK_THRESHOLD: float = 0.50   # macro RISK >= 0.5 -> cap AA
+    # alpha decay (age_d1 -> score penalty)
+    DECAY_HALF_LIFE: int = 35        # jours pour réduire le score de moitié (forex trends typiques)
+    DECAY_FLOOR: float = 0.30        # plancher : un signal très vieux ne score jamais 0
     # contradictions
     C1_TRG_MIN: float = 0.5
     C1_RMG_MAX: float = 0.35
@@ -868,6 +873,25 @@ def build_factor_vector(a: CanonicalAsset, themes: MarketThemes,
 # ════════════════════════════════════════════════════════════════════════════
 def score_absolute(fv: FactorVector) -> float:
     return fv.absolute_mean
+
+
+def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
+    """Multiplicateur exponentiel [DECAY_FLOOR, 1.0] en fonction de l'âge du signal.
+
+    Formule : decay = max(DECAY_FLOOR, exp(-age / DECAY_HALF_LIFE))
+    - age=0j  -> decay=1.000 (aucun effet)
+    - age=35j -> decay≈0.500 (half-life par défaut)
+    - age=70j -> decay≈0.300 (plafonné au floor)
+    - age=117j -> decay=DECAY_FLOOR (plancher, jamais 0)
+
+    Le floor évite d'éjecter automatiquement un signal structurellement
+    solide mais âgé — la conviction finale reste influencée par les flags
+    et caps, pas seulement par le decay.
+    """
+    if age_d1 <= 0:
+        return 1.0
+    raw = math.exp(-age_d1 / cfg.DECAY_HALF_LIFE)
+    return max(cfg.DECAY_FLOOR, raw)
 
 
 def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
@@ -1445,22 +1469,30 @@ def _pipeline_factors_and_grades(
         lv = build_levels(a, config)
         lv_cache[a.symbol] = lv
         drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv))
-    # cross-section quantiles
+    # cross-section quantiles (calculés sur absolute_mean brut — cross-section est un rang relatif,
+    # le decay ne doit pas biaiser l'ordre d'urgence intra-univers)
     quantiles = compute_quantiles(vectors)
     for s in drafts:
         s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
-    # contradictions + grade
+    # alpha decay + contradictions + grade
     asset_by_sym = {a.symbol: a for a in universe.passed}
     fv_by_sym = {v.symbol: v for v in vectors}
     for s in drafts:
         a = asset_by_sym[s.symbol]
         fv = fv_by_sym[s.symbol]
+        # — alpha decay : age_d1 vient du setup (déjà extrait de mtf) —
+        decay = _alpha_decay_factor(s.age_d1, config)
+        raw_mean = s.factor_scores.absolute_mean        # pré-decay (pour audit)
+        decayed_mean = _clamp01(raw_mean * decay)
+        s.factor_scores.absolute_mean_raw = round(raw_mean, 4)
+        s.factor_scores.decay_factor = round(decay, 4)
+        s.factor_scores.absolute_mean = round(decayed_mean, 4)
         flags = detect_contradictions(a, fv, themes, cal_sets, config)
         s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
         cap, cap_reason = apply_caps(a, fv, config)
         if cap_reason:
             s.capped_reason = cap_reason
-        s.conviction = grade(fv.absolute_mean, flags, cap, config)
+        s.conviction = grade(decayed_mean, flags, cap, config)
         s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
     return vectors, drafts, lv_cache
 
@@ -1963,7 +1995,7 @@ function downloadHtml(){
       {% if s.capped_reason %}<div class="cap-note">Plafond conviction appliqué : {{s.capped_reason}}</div>{% endif %}
       <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
       <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
-      <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
+      <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · raw={{ '%.4f'|format(fs.absolute_mean_raw) }} · decay={{ '%.4f'|format(fs.decay_factor) }} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
     </div>
   </div>
   {% endfor %}
