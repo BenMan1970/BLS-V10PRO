@@ -1713,8 +1713,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
   body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
 
-  /* ── EN-TÊTE : ultra-compact en print pour tenir en haut de page 1 ── */
-  .page-top{break-inside:avoid!important;break-after:avoid!important}
+  /* ── EN-TÊTE : dans le flux du wrap, margin négatif pour full-bleed ── */
+  .page-top{
+    break-inside:avoid!important;break-after:avoid!important;
+    margin:-5mm -10mm 4mm -10mm!important;
+  }
   .page-header{
     border-radius:0!important;box-shadow:none!important;
     padding:3px 10mm!important;min-height:0!important;
@@ -1737,7 +1740,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
     border-bottom:1px solid var(--border)!important;
   }
   .confidential{font-size:5pt!important;padding:1px 6px!important}
-  .wrap{padding:4mm 10mm 8mm 10mm!important}
+  .wrap{padding:5mm 10mm 8mm 10mm!important}
 
   /* ── SECTION ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
@@ -1838,6 +1841,7 @@ function downloadHtml(){
 }
 </script>
 <div id="page">
+<div class="wrap">
 <div class="page-top">
 <div class="page-header">
   <div class="header-left">
@@ -1855,7 +1859,6 @@ function downloadHtml(){
   <span class="confidential">CONFIDENTIEL</span>
 </div>
 </div><!-- /.page-top -->
-<div class="wrap">
 
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
