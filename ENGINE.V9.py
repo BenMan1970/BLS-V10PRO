@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import base64
 import io
 import json
 import logging
@@ -1843,8 +1844,24 @@ function downloadHtml(){
   document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 }
+function downloadPdf(){
+  const b64=document.getElementById('_pdf_b64_data');
+  if(!b64||!b64.value){window.print();return;}
+  const byteStr=atob(b64.value);
+  const buf=new Uint8Array(byteStr.length);
+  for(let i=0;i<byteStr.length;i++)buf[i]=byteStr.charCodeAt(i);
+  const blob=new Blob([buf],{type:'application/pdf'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.pdf";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
 </script>
-<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
+<input type="hidden" id="_pdf_b64_data" value="{{pdf_b64}}">
+<div id="pdf-fab"><button onclick="downloadPdf()">Télécharger PDF</button></div>
 <div id="page">
 <div class="wrap">
 <div class="page-top">
@@ -1972,7 +1989,7 @@ def _get_template() -> jinja2.Template:
 
 def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
                   clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
-                  n_passed: int, cfg: V4Config = CONFIG) -> str:
+                  n_passed: int, cfg: V4Config = CONFIG, pdf_b64: str = "") -> str:
     risk = "Low"
     if calendar:
         if calendar.blackout:
@@ -1995,6 +2012,7 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         event_risk=risk, themes=theme_str, sr_degraded=sr_degraded,
         setups=setups, elimines=eliminated,
         max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
+        pdf_b64=pdf_b64,
     )
 
 
