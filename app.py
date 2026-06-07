@@ -6,27 +6,11 @@ import importlib.util
 import sys
 import tempfile
 import os
-import io
 import json
 from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-
-# -- WeasyPrint (PDF natif cote serveur) --
-try:
-    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
-    _HAS_WEASYPRINT = True
-except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-    _HAS_WEASYPRINT = False
-
-
-def _html_to_pdf_bytes(html_content: str) -> bytes:
-    """Genere un PDF calibre en memoire via WeasyPrint. Retourne les bytes."""
-    buf = io.BytesIO()
-    _WeasyHTML(string=html_content).write_pdf(buf)
-    return buf.getvalue()
-
 
 # -- Import du moteur (cache_resource pour ne pas recharger a chaque interaction) --
 @st.cache_resource(show_spinner=False)
@@ -68,14 +52,6 @@ with st.sidebar:
         st.error("Moteur introuvable")
     else:
         st.success(f"Moteur charge : {_engine_name}")
-
-    st.divider()
-
-    if _HAS_WEASYPRINT:
-        st.success("WeasyPrint actif -- PDF natif disponible")
-    else:
-        st.warning("WeasyPrint indisponible -- PDF en fallback HTML")
-        st.caption("Ajoute weasyprint dans requirements.txt + libs systeme (cairo, pango)")
 
     st.divider()
     st.markdown("### Pipeline")
@@ -210,26 +186,14 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
 
                 html = run_pipeline(**kwargs)
 
-                # Nom de fichier stocké en session pour rester disponible au téléchargement
+                # Nom de fichier : date du rapport depuis le merged JSON déjà parsé
                 try:
-                    _md = json.loads(merged_file.getvalue().decode("utf-8"))
-                    _ga = _md.get("meta", {}).get("generated_at", "")
+                    _ga = json.loads(merged_file.getvalue().decode("utf-8")).get("meta", {}).get("generated_at", "")
                     _rd = datetime.fromisoformat(_ga.replace("Z", "+00:00")).strftime("%Y.%m.%d")
                 except Exception:  # noqa: BLE001
                     _rd = datetime.now().strftime("%Y.%m.%d")
                 st.session_state["report_base_name"] = f"BLUESTAR FX Desk_Signal Report_{_rd}"
                 st.session_state["report_html"] = html
-                st.session_state["report_pdf"] = None
-                st.session_state["report_pdf_err"] = None
-
-                # Generation PDF si WeasyPrint dispo
-                if _HAS_WEASYPRINT:
-                    with st.spinner("Generation PDF natif..."):
-                        try:
-                            st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
-                        except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                            st.session_state["report_pdf_err"] = str(pdf_err)
-
                 st.success("Rapport genere avec succes")
 
             except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -277,5 +241,5 @@ else:
 
     **Notes :**
     - Sans calendrier, le pipeline tourne en mode degrade : F7 MACRO = 1.0, pas de blackout.
-    - WeasyPrint est requis pour le PDF natif. Sinon, utilisez le fallback HTML + impression navigateur.
+    - Le PDF se telecharge via le bouton integre dans le rapport HTML.
     """)
