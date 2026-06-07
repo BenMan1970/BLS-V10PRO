@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import base64
 import io
 import json
 import logging
@@ -1969,7 +1968,7 @@ def _get_template() -> jinja2.Template:
 
 def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
                   clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
-                  n_passed: int, cfg: V4Config = CONFIG, pdf_b64: str = "") -> str:
+                  n_passed: int, cfg: V4Config = CONFIG) -> str:
     risk = "Low"
     if calendar:
         if calendar.blackout:
@@ -1992,7 +1991,6 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         event_risk=risk, themes=theme_str, sr_degraded=sr_degraded,
         setups=setups, elimines=eliminated,
         max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
-        pdf_b64=pdf_b64,
     )
 
 
