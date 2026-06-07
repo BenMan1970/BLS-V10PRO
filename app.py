@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import tempfile
 import os
+import base64
 import io
 import json
 from pathlib import Path
@@ -218,7 +219,16 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                 if _HAS_WEASYPRINT:
                     with st.spinner("Generation PDF natif..."):
                         try:
-                            st.session_state["report_pdf"] = _html_to_pdf_bytes(html)
+                            pdf_bytes = _html_to_pdf_bytes(html)
+                            st.session_state["report_pdf"] = pdf_bytes
+                            # Injecter le PDF en base64 dans le bouton du HTML
+                            pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+                            html = html.replace(
+                                'id="_pdf_b64_data" value=""',
+                                f'id="_pdf_b64_data" value="{pdf_b64}"',
+                                1,
+                            )
+                            st.session_state["report_html"] = html
                         except Exception as pdf_err:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                             st.session_state["report_pdf_err"] = str(pdf_err)
 
