@@ -1716,11 +1716,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
   /* ── EN-TÊTE : dans le flux du wrap, margin négatif pour full-bleed ── */
   .page-top{
     break-inside:avoid!important;break-after:avoid!important;
-    margin:-5mm -10mm 4mm -10mm!important;
+    margin:-5mm -5mm 4mm -5mm!important;
   }
   .page-header{
     border-radius:0!important;box-shadow:none!important;
-    padding:3px 10mm!important;min-height:0!important;
+    padding:3px 5mm!important;min-height:0!important;
     border-left:none!important;border-right:none!important;border-top:none!important;
     border-bottom:1px solid var(--border)!important;
   }
@@ -1735,12 +1735,12 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .logo-marker svg{width:14px!important;height:14px!important}
   .header-right{padding-left:8px!important}
   .page-subbar{
-    padding:2px 10mm!important;gap:6px!important;font-size:5.5pt!important;
+    padding:2px 5mm!important;gap:6px!important;font-size:5.5pt!important;
     border-left:none!important;border-right:none!important;
     border-bottom:1px solid var(--border)!important;
   }
   .confidential{font-size:5pt!important;padding:1px 6px!important}
-  .wrap{padding:5mm 10mm 8mm 10mm!important}
+  .wrap{padding:5mm 5mm 8mm 5mm!important}
 
   /* ── SECTION ── */
   .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
@@ -1813,7 +1813,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
-  .footer{display:block!important;padding:5px 10mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
+  .footer{display:block!important;padding:5px 5mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
   #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
