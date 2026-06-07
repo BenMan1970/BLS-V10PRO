@@ -1492,28 +1492,19 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 16 — RENDER  (template calibré + média print A4 — RENDU CORRIGÉ v10.2)
+# SECTION 16 — RENDER  (template calibré + média print A4 maîtrisé)
 # ════════════════════════════════════════════════════════════════════════════
-# DESIGN NOTE — PDF calibration (v10.2, RENDU CORRIGÉ) :
-#   Corrections appliquées par rapport au template précédent (cause du rendu
-#   "pas pro" en PDF) :
-#     1. SUPPRESSION DÉFINITIVE des sauts de page forcés tous les 2 setups
-#        (les anciens `.print-ctx-bar.print-pb` sur loop.index odd). Ils
-#        créaient de grands blancs en bas de page + un setup orphelin, exactement
-#        le défaut décrit dans la note d'origine. La pagination automatique
-#        combinée à break-inside:avoid remplit chaque page au maximum sans jamais
-#        couper une carte.
-#     2. Le bandeau de contexte print n'apparaît plus QU'UNE SEULE FOIS, sous
-#        l'en-tête de la section 1 (loop.first), comme repère de cadrage initial.
-#        Plus aucun bandeau de continuation parasite en milieu de flux.
-#     3. Audit trail homogène : toutes les cartes utilisent le même bloc compact
-#        et lisible (plus d'exception sur la dernière carte).
-#     4. En-tête riche en page 1 uniquement (flux) ; pages 2+ ne portent que la
-#        marginale @top-* légère. Plus de double information.
-#     5. Marginales @page épurées + échelle typographique en pt stables pour un
-#        rendu proportionnel identique entre WeasyPrint et l'impression navigateur.
-#     6. La section « Éliminés » démarre proprement sur une nouvelle page
-#        (break-before:page), sans laisser d'orphelin de la section 1.
+# DESIGN NOTE — PDF calibration:
+#   Le calibrage repose sur 3 leviers, tous dans le CSS @media print ci-dessous,
+#   activés à l'identique par WeasyPrint (PDF natif) ET par l'impression
+#   navigateur (repli) :
+#     1. @page : A4 portrait, marges UNIFORMES (12mm), en-tête/pied paginés
+#        via @top-center / @bottom-center + compteur de page.
+#     2. Échelle typographique en unités relatives stables (pas de px flottants)
+#        pour un rendu proportionnel identique quel que soit le moteur.
+#     3. break-inside:avoid sur .section / .setup / table-row + orphans/widows
+#        pour empêcher les cartes coupées entre deux pages (cause n°1 du rendu
+#        "pas pro").
 _INLINE_TEMPLATE = """<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -1620,111 +1611,118 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 
-/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ (v10.2 corrigé) ═══════════════
-   Levier 1 : @page A4 portrait, marges uniformes, en-tête/pied paginés (compteur).
-   Levier 2 : largeur de contenu = zone imprimable, échelle pt stable (pas de scale).
-   Levier 3 : break-inside:avoid sur .setup / grilles / lignes de table + orphans/widows.
-   PRINCIPE CLÉ : AUCUN saut de page forcé sur les setups. La pagination auto
-   remplit chaque page au maximum ; break-inside:avoid garantit qu'aucune carte
-   n'est coupée. La section Éliminés démarre sur une page neuve (break-before). */
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 MAÎTRISÉ ═══════════════
+   Levier 1 : page A4 + marges uniformes + en-tête/pied paginés.
+   Levier 2 : largeur de contenu fixée à la zone imprimable (pas de scale).
+   Levier 3 : anti-coupure (break-inside) + orphans/widows.                */
 @page{
   size:A4 portrait;
-  margin:13mm 11mm 14mm 11mm;
+  margin:14mm 12mm 16mm 12mm;
+  @top-left{
+    content:"BLUESTAR · FX CASCADE";
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#1B45B4;font-weight:700;letter-spacing:.1em;
+  }
   @top-center{
-    content:"BLUESTAR · FX CASCADE  ·  {{date_hdr}}";
-    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.1em;
+    content:"{{date_hdr}}";
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
+  }
+  @top-right{
+    content:"Page " counter(page) " / " counter(pages);
+    font-family:'IBM Plex Mono',monospace;font-size:6.5pt;color:#6B89D8;letter-spacing:.08em;
   }
   @bottom-left{
-    content:"CONFIDENTIEL · USAGE INTERNE · BLUESTAR v10 HYBRID V4";
-    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
+    content:"CONFIDENTIEL · USAGE INTERNE";
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
+  }
+  @bottom-center{
+    content:"BLUESTAR SYSTEM v10 HYBRID V4";
+    font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.1em;
   }
   @bottom-right{
-    content:"Page " counter(page) " / " counter(pages);
+    content:"Score absolu · Quantile départage";
     font-family:'IBM Plex Mono',monospace;font-size:6pt;color:#6B89D8;letter-spacing:.08em;
   }
 }
-/* Page 1 : pas de marginale haute (le bloc en-tête riche occupe déjà la zone). */
-@page:first{ @top-center{content:""} }
-
+@page:first{
+  @top-left{content:""}
+  @top-center{content:""}
+  @top-right{content:""}
+}
 @media print{
   *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   html,body{background:#fff!important}
-  /* Base typographique : densité régulière, ~2 setups par page A4. */
-  body{font-size:7.4pt!important;line-height:1.4!important}
+  /* Taille de base réduite pour densifier le rendu — cible: ~2 setups/page */
+  body{font-size:7.2pt!important;line-height:1.35!important}
   #page{max-width:none!important;width:100%!important;margin:0!important;background:#fff!important}
-  .wrap{padding:0 2px!important}
+  .wrap{padding:0 4px!important}
 
-  /* ── EN-TÊTE RICHE : page 1 uniquement, compact ── */
-  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:7px 12px!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
-  .sys-name{font-size:15px!important}
+  /* ── EN-TÊTE : compact, ne doit pas voler de l'espace ── */
+  .page-header{border-radius:4px 4px 0 0!important;box-shadow:none!important;padding:6px 12px!important}
+  .sys-name{font-size:14px!important}
   .sys-label,.sys-desc,.briefing-label,.briefing-sub{font-size:6.5pt!important}
   .logo-marker{width:24px!important;height:24px!important}
-  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important;
-               break-inside:avoid!important;page-break-inside:avoid!important}
+  .page-subbar{box-shadow:none!important;padding:4px 12px!important;gap:10px!important;font-size:7pt!important}
 
-  /* ── SECTION : overflow visible pour autoriser la fragmentation ── */
-  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:none!important}
-  .sec-body{overflow:visible!important;padding:7px 6px!important}
-  .sec-hdr{padding:5px 10px!important;border:1px solid var(--border)!important;border-radius:4px!important;
-           break-after:avoid!important;page-break-after:avoid!important}
+  /* ── SECTION : overflow visible pour permettre la fragmentation ── */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important}
+  .sec-body{overflow:visible!important;padding:6px 10px!important}
+  .sec-hdr{padding:5px 10px!important}
   .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
   .sec-ttl{font-size:8pt!important}
   .sec-sub{font-size:7pt!important}
 
-  /* ── SETUP CARD : entière, jamais coupée, AUCUN saut forcé ── */
-  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
+  /* ── SETUP CARD : overflow visible, anti-coupure maintenu ── */
+  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:4px!important;
          break-inside:avoid!important;page-break-inside:avoid!important}
-  .setup-hdr{padding:5px 10px!important;gap:6px!important;break-after:avoid!important;page-break-after:avoid!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important}
   .setup-body{padding:6px 10px!important}
-  .pair{font-size:12.5px!important}
+  .pair{font-size:12px!important}
   .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
   .scen-lbl{font-size:7pt!important}
   .cluster-tag{font-size:7pt!important}
 
-  /* ── GRILLES FACTEURS / MÉTRIQUES : solidaires de leur carte ── */
-  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+  /* ── GRILLES DE FACTEURS & MÉTRIQUES : moins de padding ── */
+  .factor-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
                break-inside:avoid!important;page-break-inside:avoid!important}
   .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .factor-val{font-size:9pt!important}
-  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+  .metrics-grid{padding:4px 5px!important;gap:2px!important;margin-bottom:4px!important;
                 break-inside:avoid!important;page-break-inside:avoid!important}
   .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
   .metric-val{font-size:9pt!important}
 
-  /* ── GRILLE PRIX ── */
-  .px-grid{gap:4px!important;margin-bottom:5px!important;
+  /* ── GRILLE PRIX (entry/SL/TP) ── */
+  .px-grid{gap:3px!important;margin-bottom:4px!important;
            break-inside:avoid!important;page-break-inside:avoid!important}
-  .px-card{padding:4px 7px!important}
+  .px-card{padding:4px 6px!important}
   .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
-  .px-val{font-size:10.5pt!important}
+  .px-val{font-size:10pt!important}
   .px-sub{font-size:6.5pt!important;margin-top:1px!important}
 
-  /* ── RATIONALE & AUDIT : compacts, solidaires ── */
-  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;
+  /* ── RATIONALE & AUDIT : compacts ── */
+  .rationale{padding:4px 7px!important;margin-bottom:4px!important;font-size:6.5pt!important;
              break-inside:avoid!important;page-break-inside:avoid!important}
   .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
+  .audit-block{padding:4px 7px!important;margin-top:4px!important;font-size:5.8pt!important;
+               line-height:1.28!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
+  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
+           break-inside:avoid!important;page-break-inside:avoid!important}
   .flags-row{gap:4px!important;margin-bottom:5px!important;
              break-inside:avoid!important;page-break-inside:avoid!important}
   .flag{font-size:6.5pt!important;padding:1px 5px!important}
-  .cap-note{font-size:6.5pt!important;margin-bottom:4px!important}
-  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;
-           break-inside:avoid!important;page-break-inside:avoid!important}
-  .cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{font-size:6.5pt!important;padding:1px 5px!important}
-  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;
-               line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
-  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
   .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;
           break-inside:avoid!important;page-break-inside:avoid!important}
 
-  /* ── SECTION 2 (éliminés) : démarre proprement sur une nouvelle page ── */
+  /* ── SECTION 2 (éliminés) : saut de page propre ── */
   .section + .section{break-before:page!important;page-break-before:always!important}
+  .sec-hdr,.setup-hdr{break-after:avoid!important;page-break-after:avoid!important}
   .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
-  .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .elim{padding:5px 8px!important;margin-bottom:4px!important}
   .elim-pair{font-size:8pt!important;min-width:60px!important}
   .elim-txt{font-size:7pt!important}
 
-  /* ── TABLE des rejets : en-tête répété, lignes insécables ── */
+  /* ── TABLE des rejets ── */
   table{font-size:7pt!important}
   thead th{padding:4px 7px!important;font-size:6.5pt!important}
   tbody td{padding:3px 7px!important}
@@ -1733,20 +1731,32 @@ tbody td{padding:5px 10px;vertical-align:middle}
   tfoot{display:table-footer-group!important}
   .reject-code{font-size:7pt!important}
 
-  /* ── BANDEAU CONTEXTE PRINT : repère de cadrage UNIQUE (sous sec-hdr §1) ── */
+  /* Bandeau meta-info : caché écran, affiché en print.
+     Avant setup 1 : sous le sec-hdr (contexte initial).
+     Avant setups 3,5 : repère de continuation en haut de nouvelle page. */
   .print-ctx-bar{
     display:block!important;
     font-family:var(--mono)!important;font-size:6pt!important;font-weight:600!important;
     color:var(--sec)!important;background:var(--card)!important;
-    border:1px solid var(--border)!important;border-radius:4px!important;
-    padding:3px 10px!important;margin-bottom:6px!important;
+    border-top:none!important;border-left:none!important;border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
+    padding:2px 10px!important;margin-bottom:5px!important;
     letter-spacing:.04em!important;
-    break-inside:avoid!important;page-break-inside:avoid!important;
-    break-after:avoid!important;page-break-after:avoid!important;
+  }
+  /* ctx-bar avec page-break : force une nouvelle page AVANT le bandeau */
+  .print-ctx-bar.print-pb{
+    break-before:page!important;
+    page-break-before:always!important;
+    margin-top:0!important;
+  }
+  /* Audit trail compact (dernière carte) : tout sur 2 lignes max */
+  .audit-compact{
+    white-space:normal!important;
+    line-height:1.25!important;
   }
   /* Blackout grid compact en print */
   .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
-  .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .sus-item{padding:3px 7px!important}
   .sus-item-pair{font-size:8pt!important}
   .sus-item-txt{font-size:6.5pt!important}
   p,li{orphans:3;widows:3}
@@ -1754,7 +1764,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   #pdf-fab{display:none!important}
   a[href]:after{content:""!important}
 }
-/* Context bar : masqué écran, repère contextuel print page 1 uniquement */
+/* Context bar : masqué écran, repère contextuel print pages 2+ */
 .print-ctx-bar{display:none}
 /* Blackout grid compact */
 .sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
@@ -1790,12 +1800,12 @@ tbody td{padding:5px 10px;vertical-align:middle}
   <div class="sec-body">
   {% if sr_degraded %}<div class="banner">⚠ SR indisponible — niveaux en mode ATR synthétique (entrées Market, TP 2×ATR)</div>{% endif %}
   {% if setups %}
-  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
   {% set cv = s.conviction.value|lower %}
   {% set fs = s.factor_scores %}
+  {% if loop.first %}<div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>{% elif loop.index is odd %}<div class="print-ctx-bar print-pb">§{{loop.index}}/{{n_setups}} &nbsp;·&nbsp; {{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong></div>{% endif %}
   <div class="setup {{cv}}">
     <div class="setup-hdr {{dc}}">
       <span class="pair">{{s.symbol}}</span>
@@ -1834,7 +1844,11 @@ tbody td{padding:5px 10px;vertical-align:middle}
       {% if s.capped_reason %}<div class="cap-note">Plafond conviction appliqué : {{s.capped_reason}}</div>{% endif %}
       <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
       <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
+      {% if loop.last %}
+      <div class="audit-block audit-compact"><strong>Audit Trail</strong>{{s.sl_detail}} &nbsp;|&nbsp; {{s.rr_detail}} &nbsp;|&nbsp; score={{ '%.4f'|format(fs.absolute_mean) }} · q={{ '%.4f'|format(fs.quantile) }} · ATR={{s.atr_source}} · cluster={{s.cluster}}</div>
+      {% else %}
       <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
+      {% endif %}
     </div>
   </div>
   {% endfor %}
