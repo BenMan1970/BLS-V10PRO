@@ -458,6 +458,7 @@ class SetupV4(BaseModel):
     atr_source: str = "unknown"
     distance_atr: float = 0.0
     choch_score: Optional[float] = None
+    choch_info: Optional[str] = None   # label court si CHoCH présent (aligné ou non) ex: "H4 Bearish 85 (3c)"
     gps_quality: Optional[str] = None
     mtf_pct: int = 0
     rsi_h4: Optional[float] = None
@@ -1482,6 +1483,36 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
     return " · ".join(parts)
 
 
+def _best_choch_info(a: CanonicalAsset) -> Optional[str]:
+    """Retourne un label court pour le meilleur CHoCH disponible sur l'asset,
+    qu'il soit aligné avec la direction du trade ou non.
+
+    Format : "<TF> <Dir> <Score> (<candles>c)"
+    Ex : "H4 Bearish 85 (3c)"  ou  "D1 Bullish 65 (2c) ⚠contra"
+
+    ⚠contra est ajouté si la direction du CHoCH est contraire à la direction du trade.
+    Retourne None si aucun CHoCH Fresh présent.
+    """
+    if not a.structure_events:
+        return None
+    fresh = [ev for ev in a.structure_events if ev.status.lower() == "fresh"]
+    if not fresh:
+        return None
+    # Trier : aligné d'abord, puis par confluence_score desc
+    trade_dir = a.mtf.direction if a.mtf else None
+    def _sort_key(ev: StructureEventView) -> tuple:
+        aligned = int(_dir_eq(ev.direction, trade_dir)) if trade_dir else 0
+        return (-aligned, -(ev.confluence_score or 0))
+    best = sorted(fresh, key=_sort_key)[0]
+    tf = best.timeframe or "?"
+    score = int(best.confluence_score or 0)
+    candles = best.candles_elapsed
+    label = f"{tf} {best.direction.value} {score} ({candles}c)"
+    if trade_dir and not _dir_eq(best.direction, trade_dir):
+        label += " ⚠contra"
+    return label
+
+
 def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument
                 cal: Optional[CalendarSets], cfg: V4Config,
                 lv: Optional[LevelBundle] = None) -> SetupV4:
@@ -1513,6 +1544,7 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         atr_effective=lv.atr_effective, atr_source=lv.atr_source,
         distance_atr=(lv.trigger.distance_atr_multiple or 0.0) if lv.trigger else 0.0,
         choch_score=(lv.trigger.confluence_score if lv.trigger else None),
+        choch_info=_best_choch_info(a),
         gps_quality=(a.mtf.quality if a.mtf else None),
         mtf_pct=(a.mtf.pct if a.mtf else 0),
         rsi_h4=_rsi_value(a, "H4"), rsi_h4_status=a.rsi_h4_status,
@@ -2051,7 +2083,7 @@ function downloadHtml(){
       </div>
       <div class="metrics-grid">
         <div class="metric"><div class="metric-lbl">Distance ATR</div><div class="metric-val {% if (s.distance_atr or 0) <= 0.3 %}ok{% elif (s.distance_atr or 0) <= 1.0 %}warn{% else %}danger{% endif %}">{{s.distance_atr|round(2)}}×</div></div>
-        <div class="metric"><div class="metric-lbl">Score CHoCH</div><div class="metric-val {% if (s.choch_score or 0) >= 70 %}ok{% elif (s.choch_score or 0) >= 50 %}warn{% else %}danger{% endif %}">{{s.choch_score|round(0)|int if s.choch_score else '—'}}</div></div>
+        <div class="metric"><div class="metric-lbl">Score CHoCH</div><div class="metric-val {% if (s.choch_score or 0) >= 70 %}ok{% elif (s.choch_score or 0) >= 50 %}warn{% else %}danger{% endif %}">{{s.choch_score|round(0)|int if s.choch_score else '—'}}</div>{% if s.choch_info %}<div style="font-size:7px;color:var(--muted);font-family:var(--mono);margin-top:1px">{{s.choch_info}}</div>{% endif %}</div>
         <div class="metric"><div class="metric-lbl">Quality</div><div class="metric-val {% if s.gps_quality in ['A+','A'] %}ok{% else %}warn{% endif %}">{{s.gps_quality or '—'}}</div></div>
         <div class="metric"><div class="metric-lbl">MTF %</div><div class="metric-val {% if s.mtf_pct >= 85 %}ok{% elif s.mtf_pct >= 60 %}warn{% else %}danger{% endif %}">{{s.mtf_pct}}%</div></div>
         <div class="metric"><div class="metric-lbl">RSI H4</div><div class="metric-val {% if s.rsi_h4_status == 'favorable' %}ok{% elif 'extreme' in (s.rsi_h4_status or '') %}danger{% else %}warn{% endif %}">{{s.rsi_h4|round(1) if s.rsi_h4 else '—'}}</div></div>
