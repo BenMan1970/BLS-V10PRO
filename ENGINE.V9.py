@@ -619,10 +619,24 @@ class V4Config:
 CONFIG = V4Config()
 
 # Execution-context point maps for F5 XCTX (bounded, categorical)
-_XCTX_FORCE = MappingProxyType({"fort": 1.0, "strong": 1.0, "": 0.5, "faible": 0.0, "weak": 0.0})
-_XCTX_VOL = MappingProxyType({"haute": 1.0, "high": 1.0, "": 0.5, "faible": 0.3, "basse": 0.3, "low": 0.3})
-_XCTX_SESSION = MappingProxyType({"london": 1.0, "newyork": 1.0, "ny": 1.0, "us": 1.0,
-                                  "asian": 0.5, "tokyo": 0.5, "sydney": 0.5, "off": 0.0, "": 0.3})
+_XCTX_FORCE = MappingProxyType({
+    "fort": 1.0, "strong": 1.0,
+    "moyen": 0.6, "medium": 0.6,
+    "": 0.5,
+    "faible": 0.0, "weak": 0.0,
+})
+_XCTX_VOL = MappingProxyType({
+    "haute": 1.0, "high": 1.0,
+    "moyenne": 0.55, "medium": 0.55,
+    "": 0.5,
+    "faible": 0.3, "basse": 0.3, "low": 0.3,
+})
+_XCTX_SESSION = MappingProxyType({
+    "london": 1.0, "newyork": 1.0, "ny": 1.0, "us": 1.0, "london_ny_overlap": 1.0,
+    "asian": 0.5, "tokyo": 0.5, "sydney": 0.5,
+    "off": 0.0,
+    "": 0.3,
+})
 _XCTX_BB = MappingProxyType({"squeeze": 1.0, "normal": 0.6, "expansion": 0.3, "": 0.6})
 
 _EXT_STATUSES = ("extreme_overbought", "extreme_oversold", "overbought", "oversold")
@@ -864,13 +878,17 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
+def _norm_lookup(v: Any) -> str:
+    return str(v or "").strip().lower()
+
+
 def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
-    force = _XCTX_FORCE.get((ev.force or "").lower(), 0.5)
-    vol = _XCTX_VOL.get((ev.volatility or "").lower(), 0.5)
-    session = _XCTX_SESSION.get((ev.session or "").lower(), 0.3)
+    force = _XCTX_FORCE.get(_norm_lookup(ev.force), 0.5)
+    vol = _XCTX_VOL.get(_norm_lookup(ev.volatility), 0.5)
+    session = _XCTX_SESSION.get(_norm_lookup(ev.session), 0.3)
     bb = _XCTX_BB.get((ev.bb_regime or "").lower(), 0.6)
     score = _clamp01((force + vol + session + bb) / 4.0)
     detail = (f"XCTX force={force:.1f} vol={vol:.1f} sess={session:.1f} bb={bb:.1f} "
