@@ -307,7 +307,12 @@ class ZoneView(BaseModel):
     level: float
     side: str = ""
     score: float = 0.0
+    weighted_score: float = 0.0      # score pondéré par TF (déjà calculé en amont)
     distance_pct: float = 999.0
+    timeframes: list[str] = Field(default_factory=list)
+    has_weekly: bool = False
+    has_daily: bool = False
+    has_h4: bool = False
 
 
 class CanonicalAsset(BaseModel):
@@ -553,6 +558,12 @@ class V4Config:
     TRG_SCORE_CAP: float = 85.0
     TRG_FRESH_MAX: int = 6
     TRG_DIST_ATR_MAX: float = 1.0
+    # SR structure bonus dans F4 (zone SR multi-TF proche du trigger)
+    SR_BONUS_MAX: float = 0.20       # bonus max ajouté au score F4 si zone SR multi-TF alignée
+    SR_DIST_MAX_PCT: float = 2.0     # distance max (%) pour qu'une zone soit considérée proche
+    SR_W_W1: float = 0.50            # poids W1 dans le score SR composite
+    SR_W_D1: float = 0.30            # poids D1
+    SR_W_H4: float = 0.20            # poids H4
     # F6 THEME
     THEME_MIN_VOTES: int = 3
     THEME_BULL_HI: float = 0.8
@@ -592,6 +603,7 @@ class V4Config:
     # selection
     MAX_SETUPS: int = 5
     MAX_EXPOSURE_PER_CCY: int = 2
+    MIN_CONVICTION: str = "BB"       # conviction minimum post-decay pour entrer en sélection
 
     @classmethod
     def from_dict(cls, d: dict) -> "V4Config":
@@ -788,6 +800,51 @@ def f3_ext(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f3_ext", float(ext_in_dir), score, False, detail)
 
 
+def _sr_structure_bonus(a: CanonicalAsset, cfg: V4Config) -> tuple[float, str]:
+    """Bonus SR [0.0, SR_BONUS_MAX] si une zone SR proche est confirmée sur plusieurs TF.
+
+    Logique :
+    - Cherche dans a.zones la zone la plus proche du prix (distance_pct minimale)
+      dont le side est compatible avec la direction du trade.
+    - Si distance_pct > SR_DIST_MAX_PCT : pas de bonus (zone trop lointaine).
+    - Score composite = SR_W_W1 * has_weekly + SR_W_D1 * has_daily + SR_W_H4 * has_h4
+    - Bonus = composite × SR_BONUS_MAX (bonus maximal si W1+D1+H4 tous présents).
+    - Retourne (bonus, detail_str).
+    """
+    if a.mtf is None or not a.zones:
+        return 0.0, "SR: pas de zones"
+
+    direction = a.mtf.direction
+
+    def _side_ok(z: ZoneView) -> bool:
+        s = z.side.upper()
+        if direction is Direction.BULLISH:
+            return s in ("BUY", "SUPPORT", "ROLE REVERSE", "")
+        return s in ("SELL", "RESISTANCE", "ROLE REVERSE", "")
+
+    candidates = [z for z in a.zones
+                  if z.distance_pct <= cfg.SR_DIST_MAX_PCT and _side_ok(z)]
+    if not candidates:
+        return 0.0, f"SR: aucune zone compatible <{cfg.SR_DIST_MAX_PCT}%"
+
+    # Zone la plus proche
+    best = min(candidates, key=lambda z: z.distance_pct)
+    composite = (
+        cfg.SR_W_W1 * float(best.has_weekly)
+        + cfg.SR_W_D1 * float(best.has_daily)
+        + cfg.SR_W_H4 * float(best.has_h4)
+    )
+    bonus = _clamp01(composite) * cfg.SR_BONUS_MAX
+    tfs = best.timeframes or (
+        (["W1"] if best.has_weekly else [])
+        + (["D1"] if best.has_daily else [])
+        + (["H4"] if best.has_h4 else [])
+    )
+    detail = (f"SR: zone@{best.level:.5f} dist={best.distance_pct:.2f}% "
+              f"TF={tfs} composite={composite:.2f} bonus={bonus:.3f}")
+    return bonus, detail
+
+
 def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     ev = _aligned_trigger(a)
     if ev is None:
@@ -796,9 +853,13 @@ def f4_trg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     fresh = 1.0 - min(ev.candles_elapsed, cfg.TRG_FRESH_MAX) / cfg.TRG_FRESH_MAX
     dist = ev.distance_atr_multiple if ev.distance_atr_multiple is not None else cfg.TRG_DIST_ATR_MAX
     proximity = 1.0 - min(dist, cfg.TRG_DIST_ATR_MAX) / cfg.TRG_DIST_ATR_MAX
-    score = _clamp01(0.4 * score_n + 0.3 * fresh + 0.3 * proximity)
+    base = _clamp01(0.4 * score_n + 0.3 * fresh + 0.3 * proximity)
+    # Bonus SR structure : zone multi-TF proche du trigger
+    sr_bonus, sr_detail = _sr_structure_bonus(a, cfg)
+    score = _clamp01(base + sr_bonus)
     detail = (f"TRG score_n={score_n:.2f} fresh={fresh:.2f} prox={proximity:.2f} "
-              f"(conf={ev.confluence_score:.0f}, {ev.candles_elapsed}c, {dist:.2f}ATR)")
+              f"(conf={ev.confluence_score:.0f}, {ev.candles_elapsed}c, {dist:.2f}ATR) "
+              f"| {sr_detail}")
     return ScoredFactor("f4_trg", ev.confluence_score, score, False, detail)
 
 
@@ -1232,6 +1293,18 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
     if setup.direction is Direction.BEARISH and setup.sl <= setup.entry:
         setup.reject_code = "SL_SIGN"
         setup.reject_detail = "SL ≤ entry (bearish)"
+        return setup
+    # Conviction minimum post-decay : élimine les signaux trop dégradés pour être actionnables
+    min_ord = _CONVICTION_ORDINAL.get(cfg.MIN_CONVICTION, 0)
+    setup_ord = _CONVICTION_ORDINAL.get(setup.conviction.value, 0)
+    if setup_ord < min_ord:
+        setup.reject_code = "LOW_CONVICTION"
+        setup.reject_detail = (
+            f"Conviction {setup.conviction.value} < minimum {cfg.MIN_CONVICTION} "
+            f"(score={setup.factor_scores.absolute_mean:.4f} "
+            f"raw={setup.factor_scores.absolute_mean_raw:.4f} "
+            f"decay={setup.factor_scores.decay_factor:.4f})"
+        )
         return setup
     return setup
 
