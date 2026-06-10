@@ -478,6 +478,8 @@ class SetupV4(BaseModel):
     capped_reason: Optional[str] = None
     reject_code: Optional[str] = None
     reject_detail: Optional[str] = None
+    # FIX-PRICE-PAST-TP: prix courant au moment du scan, utilisé par preflight
+    current_price: float = 0.0
 
 
 class Universe(BaseModel):
@@ -1155,11 +1157,28 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: floa
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
         return price, "Market"
+    direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
-        return z.level, "Limit"
+        # FIX-PRICE-PAST-TP: la zone doit être devant le prix, pas derrière
+        # Bullish : on attend un pull-back -> zone SOUS le prix courant ✓
+        # Bearish : on attend un pull-back -> zone AU-DESSUS du prix courant ✓
+        # Si le prix a déjà dépassé la zone dans le sens du trade, elle est invalide
+        zone_valid = (
+            (direction is Direction.BULLISH and z.level < price) or
+            (direction is Direction.BEARISH and z.level > price)
+        )
+        if zone_valid:
+            return z.level, "Limit"
     if a.hot_zone_primary:
-        return a.hot_zone_primary.level, "Limit"
+        hz = a.hot_zone_primary
+        # FIX-PRICE-PAST-TP: même garde sur hot_zone_primary
+        hz_valid = (
+            (direction is Direction.BULLISH and hz.level < price) or
+            (direction is Direction.BEARISH and hz.level > price)
+        )
+        if hz_valid:
+            return hz.level, "Limit"
     return price, "Market"
 
 
@@ -1313,6 +1332,24 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "SL_SIGN"
         setup.reject_detail = "SL ≤ entry (bearish)"
         return setup
+    # FIX-PRICE-PAST-TP: rejeter si le prix courant a déjà atteint ou dépassé TP1
+    # (cas zone Limit stale : entry calculée sur une zone que le marché a déjà franchie)
+    if setup.current_price > 0 and setup.atr_effective > 0:
+        atr_overshoot = abs(setup.current_price - setup.entry) / setup.atr_effective
+        if setup.direction is Direction.BULLISH and setup.current_price >= setup.tp1:
+            setup.reject_code = "PRICE_PAST_TP"
+            setup.reject_detail = (
+                f"Prix {setup.current_price:.5f} ≥ TP1 {setup.tp1:.5f} "
+                f"(entry dépassée de +{atr_overshoot:.2f}×ATR)"
+            )
+            return setup
+        if setup.direction is Direction.BEARISH and setup.current_price <= setup.tp1:
+            setup.reject_code = "PRICE_PAST_TP"
+            setup.reject_detail = (
+                f"Prix {setup.current_price:.5f} ≤ TP1 {setup.tp1:.5f} "
+                f"(entry dépassée de +{atr_overshoot:.2f}×ATR)"
+            )
+            return setup
     # Conviction minimum post-decay : élimine les signaux trop dégradés pour être actionnables
     min_ord = _CONVICTION_ORDINAL.get(cfg.MIN_CONVICTION, 0)
     setup_ord = _CONVICTION_ORDINAL.get(setup.conviction.value, 0)
@@ -1571,6 +1608,8 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         htf_aligned=_htf_aligned(a),
         sl_detail=lv.sl_detail, rr_detail=lv.rr_detail,
         factor_scores=fs,
+        # FIX-PRICE-PAST-TP: snapshot du prix courant pour validation dans preflight
+        current_price=(a.current_price or 0.0),
     )
 
 
