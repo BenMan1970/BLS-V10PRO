@@ -196,6 +196,12 @@ class CalendarEvent(BaseModel):
     datetime_utc: datetime
     impact: Optional[ImpactLevel] = None
     tier: EventTier = EventTier.NONE
+    # R2 — champs Module 04 ingérés (tous optionnels, zero regression)
+    actual: Optional[str] = None
+    forecast: Optional[str] = None
+    previous: Optional[str] = None
+    hours_until: Optional[float] = None    # pré-calculé par Module 04, audit uniquement
+    priority: Optional[str] = None         # CRITICAL/HIGH/MEDIUM/PAST — audit uniquement
 
     @field_validator("currency")
     @classmethod
@@ -907,6 +913,45 @@ def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) ->
     return ScoredFactor("f6_theme", None, score, False, detail)
 
 
+def _parse_ff_value(s: Optional[str]) -> Optional[float]:
+    """Parse les valeurs Forex Factory ('0.5%', '25.8K', '-0.1%') en float.
+    Retourne None si la valeur est absente ou non numérique (ex: Rate Statement).
+    """
+    if not s or s in ("—", "", "N/A", "n/a"):
+        return None
+    try:
+        s2 = (s.strip()
+               .replace("%", "")
+               .replace("K", "e3")
+               .replace("B", "e9")
+               .replace("M", "e6"))
+        return float(s2)
+    except ValueError:
+        return None
+
+
+def _surprise_factor(ev: CalendarEvent) -> float:
+    """Retourne un facteur [0.0, 1.0] représentant la magnitude de la surprise
+    pour un event passé. 1.0 = inline ou non mesurable (risque résiduel faible).
+    0.0 = surprise majeure (volatilité résiduelle élevée).
+
+    Utilisé dans f7_macro pour moduler le risque post-event.
+    Seuls les events avec actual ET forecast parseable sont scorés précisément ;
+    les autres (Press Conference, Rate Statement sans chiffre) reçoivent 0.7.
+    """
+    actual = _parse_ff_value(ev.actual)
+    forecast = _parse_ff_value(ev.forecast)
+    if actual is None or forecast is None:
+        # Event qualitatif sans chiffre → risque modéré par défaut
+        return 0.7
+    if abs(forecast) < 1e-9:
+        return 0.5
+    deviation = abs(actual - forecast) / (abs(forecast) + 1e-9)
+    # deviation > 50% → surprise majeure → factor = 0.2
+    # deviation   0% → inline           → factor = 1.0
+    return _clamp01(1.0 - min(deviation * 2.0, 0.8))
+
+
 def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
     if cal is None:
@@ -917,6 +962,8 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
         return ScoredFactor("f7_macro", 1.0, 0.0, False, "BLACKOUT actif")
     now = clock.now_utc
     horizon: list[CalendarEvent] = list(cal.blackout) + list(cal.proximity) + list(cal.watch)
+
+    # ── Chemin futur (inchangé) ──────────────────────────────────────────────
     relevant_h: list[float] = []
     for ev in horizon:
         if ev.tier not in (EventTier.S, EventTier.A):
@@ -926,13 +973,51 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
         delta = (ev.datetime_utc - now).total_seconds() / 3600.0
         if delta >= 0:
             relevant_h.append(delta)
+
     if not relevant_h:
-        return ScoredFactor("f7_macro", 0.0, 1.0, False, "aucun event S/A futur")
-    hours = min(relevant_h)
-    risk = math.exp(-hours / cfg.MACRO_TAU_HOURS)
-    score = _clamp01(1.0 - risk)
-    detail = f"MACRO event S/A dans {hours:.1f}h risk={risk:.2f} -> {score:.2f}"
-    return ScoredFactor("f7_macro", risk, score, False, detail)
+        base_score = 1.0
+        base_detail = "aucun event S/A futur"
+        base_risk = 0.0
+    else:
+        hours = min(relevant_h)
+        base_risk = math.exp(-hours / cfg.MACRO_TAU_HOURS)
+        base_score = _clamp01(1.0 - base_risk)
+        base_detail = f"MACRO event S/A dans {hours:.1f}h risk={base_risk:.2f} -> {base_score:.2f}"
+
+    # ── R3 — Risque résiduel post-event (events passés récents) ─────────────
+    # Modulation uniquement si actual/forecast disponibles (champs R2).
+    # N'affecte jamais le score de plus de 0.25 — ne peut pas inverser un signal.
+    residual_parts: list[str] = []
+    residual_penalty = 0.0
+    for ev in horizon:
+        if ev.tier not in (EventTier.S, EventTier.A):
+            continue
+        if ev.currency not in sides:
+            continue
+        delta = (ev.datetime_utc - now).total_seconds() / 3600.0
+        if delta >= 0:
+            continue   # futur, déjà traité ci-dessus
+        _, after = TIER_WINDOWS.get(ev.tier, (2.0, 24.0))
+        if delta < -after:
+            continue   # hors fenêtre post-event
+        surprise = _surprise_factor(ev)
+        # decay exponentiel : plus l'event est récent, plus la pénalité est forte
+        recency = math.exp(delta / max(after / 3.0, 1.0))   # delta < 0 → recency ∈ (0,1)
+        penalty = recency * (1.0 - surprise)
+        if penalty > 0.05:
+            residual_penalty += penalty
+            residual_parts.append(
+                f"résidu {ev.currency} {ev.event_name[:18]} surprise={surprise:.2f}"
+            )
+
+    residual_penalty = min(residual_penalty, 0.25)   # cap absolu : jamais dominant
+    final_score = _clamp01(base_score - residual_penalty)
+    detail_parts = [base_detail]
+    if residual_parts:
+        detail_parts.append("post-event: " + "; ".join(residual_parts))
+    detail = " | ".join(detail_parts)
+
+    return ScoredFactor("f7_macro", base_risk if relevant_h else 0.0, final_score, False, detail)
 
 
 def build_factor_vector(a: CanonicalAsset, themes: MarketThemes,
@@ -1446,6 +1531,25 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
 # ════════════════════════════════════════════════════════════════════════════
 def _build_universe(assets: Mapping[str, CanonicalAsset], cal: CalendarSets,
                     cfg: V4Config) -> Universe:
+    # R5 — Audit des devises sans couverture calendaire.
+    # Un silence sur JPY/AUD/NZD/CHF n'est pas une absence de risque :
+    # le feed FF JSON peut ne pas couvrir ces devises cette semaine.
+    all_ccy: set[str] = set()
+    for a in assets.values():
+        all_ccy.add(a.base)
+        if a.quote:
+            all_ccy.add(a.quote)
+    covered_ccy: set[str] = {
+        e.currency
+        for e in list(cal.blackout) + list(cal.proximity) + list(cal.watch)
+    }
+    uncovered = all_ccy - covered_ccy
+    if uncovered:
+        logger.info(
+            "R5 devises sans couverture calendaire (f7_macro retourne 1.0 par défaut): %s",
+            sorted(uncovered),
+        )
+
     passed: list[CanonicalAsset] = []
     rejected: list[tuple[CanonicalAsset, GateCode, str]] = []
     for asset in assets.values():
@@ -1800,11 +1904,55 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
 
 
 def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
+    """Charge calendar.json produit par le Module 04 (wrapper BLUESTAR) ou par
+    CalendarData natif. Supporte les deux formats sans régression.
+
+    Priorité de lecture des events :
+      1. ``events_engine``  — champ dédié ENGINE (passés 72h + futurs, R4/R5)
+      2. ``events``         — champ UI filtré (fallback compatible ancien format)
+    """
     if not calendar_json_path:
         return CalendarData()
     with open(calendar_json_path, encoding="utf-8") as f:
         raw = f.read()
-    data = CalendarData.model_validate_json(raw)
+
+    raw_dict: dict = json.loads(raw)
+
+    # ── Détection format wrapper Module 04 vs CalendarData natif ────────────
+    # Le wrapper contient "metadata" à la racine ; le format natif ne l'a pas.
+    is_wrapper = "metadata" in raw_dict
+
+    if is_wrapper:
+        # R4 : lire events_engine en priorité (passés 72h + futurs),
+        # fallback sur events (UI filtré, peut être vide en fin de semaine).
+        events_raw: list[dict] = (
+            raw_dict.get("events_engine")
+            or raw_dict.get("events", [])
+        )
+        meta = raw_dict.get("metadata", {})
+
+        # R1 : logger explicitement si la liste est vide — silent failure sinon
+        if not events_raw:
+            logger.warning(
+                "calendar.json chargé avec 0 events "
+                "(total_high_impact=%s, upcoming=%s). "
+                "Vérifier la fenêtre temporelle du feed FF ou activer show_past.",
+                meta.get("total_high_impact", "?"),
+                meta.get("upcoming_count", "?"),
+            )
+
+        cal_events: list[CalendarEvent] = []
+        for ev in events_raw:
+            try:
+                cal_events.append(CalendarEvent.model_validate(ev))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("calendar event skipped: %s", exc)
+
+        data = CalendarData(events=cal_events)
+    else:
+        # Format CalendarData natif : validation directe (comportement original)
+        data = CalendarData.model_validate_json(raw)
+
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
