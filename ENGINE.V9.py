@@ -273,7 +273,7 @@ class MTFView(BaseModel):
     direction: Direction = Direction.NEUTRAL
     quality: str = ""
     nc: int = 0
-    age_d1: int = 0
+    age_d1: Optional[int] = 0   # null-safe: gap_open assets send None
     atr_h1: Optional[float] = None
     atr_h4: Optional[float] = None
     atr_daily: Optional[float] = None
@@ -339,6 +339,9 @@ class CanonicalAsset(BaseModel):
     nearest_aligned_zone: Optional[ZoneView] = None
     hot_zone_primary: Optional[ZoneView] = None
     conviction_cap: Optional[str] = None  # V4: mapped from JSON (e.g. "BBB" for synthetic ATR)
+    # v3.5.0: produced by merge engine, read-only here.
+    # None when market_context absent or merge engine crashed on this asset.
+    market_context: Optional[dict[str, Any]] = None
 
 
 class MergeMeta(BaseModel):
@@ -1150,6 +1153,23 @@ def _c5_trade_vs_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config) -
     return None
 
 
+def _c6_structural_escalation(a: CanonicalAsset) -> Optional[Flag]:
+    """C6 — v3.5.0 Phase 3.
+
+    Triggered when market_context reports an ascending counter-trend CHoCH
+    sequence across timeframe seniority levels (e.g. H1 → H4 → D1 bearish
+    in a bullish MTF asset). Severity: major.
+    Returns None when market_context absent or escalation_detected is False.
+    """
+    evs = (a.market_context or {}).get("structure_events_summary") or {}
+    if not evs.get("escalation_detected"):
+        return None
+    seq = evs.get("escalation_sequence") or []
+    seq_str = " → ".join(seq) if seq else "multi-TF"
+    return Flag("C6", "major",
+                f"Escalade structurelle counter-MTF : {seq_str}")
+
+
 def detect_contradictions(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
                           cal: Optional[CalendarSets], cfg: V4Config = CONFIG) -> list[Flag]:
     flags: list[Flag] = []
@@ -1159,6 +1179,7 @@ def detect_contradictions(a: CanonicalAsset, fv: FactorVector, themes: MarketThe
         _c3_trend_vs_calendar(a, fv, cal, cfg),
         _c4_quality_vs_potential(a, cfg),
         _c5_trade_vs_theme(a, themes, cfg),
+        _c6_structural_escalation(a),       # v3.5.0 Phase 3
     ):
         if f is not None:
             flags.append(f)
@@ -1179,6 +1200,12 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG
     macro_risk = 1.0 - fv.get("f7_macro")
     if macro_risk >= cfg.MACRO_CAP_RISK_THRESHOLD:
         caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
+    # v3.5.0 Phase 2: structural_risk Critical -> BBB cap.
+    # REVERSAL_RISK state requires 3 concurrent factors (D1 counter + HTF div + mature
+    # OR full escalation OR W1+ counter). Capping at BBB signals structural uncertainty
+    # without blocking the setup. min() below ensures the most restrictive cap wins.
+    if (a.market_context or {}).get("structural_risk") == "Critical":
+        caps.append((Conviction.BBB, "risque structurel critique (REVERSAL_RISK)"))
     if not caps:
         return None, None
     cap = min(caps, key=lambda c: _CONVICTION_ORDINAL[c[0].value])
@@ -1598,7 +1625,7 @@ def _compute_cal_status(a: CanonicalAsset, cal: Optional[CalendarSets]) -> tuple
 def _scenario_hint(a: CanonicalAsset, lv: LevelBundle) -> str:
     """Descriptive label only — NOT a scoring pivot in V4."""
     parts = []
-    age = a.mtf.age_d1 if a.mtf else 0
+    age = (a.mtf.age_d1 or 0) if a.mtf else 0
     if lv.trigger is not None:
         ev = lv.trigger
         parts.append(f"CHoCH {ev.timeframe} {ev.candles_elapsed}c score={ev.confluence_score:.0f}")
@@ -1637,6 +1664,14 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
         tb = themes.bonus_for(a.base, a.quote, a.mtf.direction)
         if tb > 0.6:
             parts.append(f"thème favorable ({tb:.2f})")
+    # v3.5.0 Phase 4: market_context enrichment (read-only, no scoring impact).
+    ctx = a.market_context or {}
+    market_state = ctx.get("market_state")
+    if market_state and market_state not in ("DATA_INCOMPLETE", "RANGE_COMPRESSION"):
+        parts.append(f"état {market_state}")
+    risk_drivers = ctx.get("structural_risk_drivers") or []
+    if risk_drivers:
+        parts.append(f"risque: {risk_drivers[0]}")
     if flags:
         parts.append("flags: " + ", ".join(f.code for f in flags))
     return " · ".join(parts)
@@ -1707,7 +1742,7 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         gps_quality=(a.mtf.quality if a.mtf else None),
         mtf_pct=(a.mtf.pct if a.mtf else 0),
         rsi_h4=_rsi_value(a, "H4"), rsi_h4_status=a.rsi_h4_status,
-        age_d1=(a.mtf.age_d1 if a.mtf else 0),
+        age_d1=((a.mtf.age_d1 or 0) if a.mtf else 0),
         cal_status=cal_status, cal_note=cal_note,
         htf_aligned=_htf_aligned(a),
         sl_detail=lv.sl_detail, rr_detail=lv.rr_detail,
@@ -1861,7 +1896,7 @@ def _collect_eliminated(universe: Universe) -> list[Eliminated]:
             direction=(m.direction if m else Direction.NEUTRAL),
             reject_code=code.value, reject_detail=detail,
             rsi_h4=(_safe_float(h4.get("value")) if isinstance(h4, dict) else None),
-            age_d1=(m.age_d1 if m else 0),
+            age_d1=((m.age_d1 or 0) if m else 0),
         ))
     return out
 
