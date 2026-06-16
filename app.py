@@ -16,21 +16,14 @@ import streamlit as st
 @st.cache_resource(show_spinner=False)
 def _load_engine():
     here = Path(__file__).parent
-    candidates = [
-        "ENGINE.V9_v10.2.1.py",  # version corrigee (prioritaire)
-        "ENGINE.V9.py",          # legacy
-        "ENGINE_V9.py",
-        "bluestar_engine_v9.py",
-    ]
-    for name in candidates:
-        path = here / name
-        if path.exists():
-            spec = importlib.util.spec_from_file_location("bluestar_engine", path)
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules["bluestar_engine"] = mod
-            spec.loader.exec_module(mod)
-            return mod, name
-    return None, None
+    path = here / "ENGINE.V9.py"
+    if not path.exists():
+        return None, None
+    spec = importlib.util.spec_from_file_location("bluestar_engine", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["bluestar_engine"] = mod
+    spec.loader.exec_module(mod)
+    return mod, "ENGINE.V9.py"
 
 
 _engine_mod, _engine_name = _load_engine()
@@ -38,7 +31,7 @@ _engine_mod, _engine_name = _load_engine()
 # -- Config page --
 st.set_page_config(
     page_title="BLUESTAR v10.2.1",
-    page_icon="blue_circle",
+    page_icon="🔵",
     layout="wide",
     initial_sidebar_state="expanded",
 )
