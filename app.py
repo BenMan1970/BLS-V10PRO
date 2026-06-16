@@ -73,10 +73,7 @@ st.title("BLUESTAR ENGINE v10.2.1")
 st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
 
 if _engine_mod is None:
-    st.error(
-        "Moteur introuvable. Verifie que ENGINE.V9_v10.2.1.py"
-        " ou ENGINE.V9.py est dans le repo."
-    )
+    st.error("Moteur introuvable. Verifie que ENGINE.V9.py est dans le repo.")
     st.stop()
 
 run_pipeline = _engine_mod.run_pipeline
