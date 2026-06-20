@@ -598,7 +598,9 @@ class V4Config:
     C1_RMG_MAX: float = 0.35
     C2_EXT_MAX: float = 0.3
     C2_HWA_MAX: float = 0.5
-    C3_MACRO_MAX: float = 0.5
+    # C3_MACRO_MAX supprimé (v10.2.2) — alignement sur MACRO_CAP_RISK_THRESHOLD
+    # pour éviter la dérive entre le seuil du cap AA et celui du flag C3
+    # (les deux constantes valaient 0.50/0.5 par coïncidence, sans lien garanti).
     C4_DIST_ATR: float = 1.0
     # preflight (ported from v9)
     RR_MIN: float = 1.5
@@ -1118,15 +1120,17 @@ def _c2_momentum_vs_trend(fv: FactorVector, cfg: V4Config) -> Optional[Flag]:
 
 def _c3_trend_vs_calendar(a: CanonicalAsset, fv: FactorVector,
                           cal: Optional[CalendarSets], cfg: V4Config) -> Optional[Flag]:
-    if fv.get("f7_macro") >= cfg.C3_MACRO_MAX:
+    if fv.get("f7_macro") >= cfg.MACRO_CAP_RISK_THRESHOLD:
         return None
     if cal is None:
         return None
     sides = {a.base, (a.quote or "")}
-    tier_s = [e for e in (list(cal.blackout) + list(cal.proximity))
-              if e.tier is EventTier.S and e.currency in sides]
-    if tier_s:
-        names = ", ".join(f"{e.currency} {e.event_name}" for e in tier_s[:2])
+    # v10.2.2 : scope élargi à S+A (était S uniquement) pour couvrir exactement
+    # les mêmes events que ceux qui font baisser f7_macro / déclenchent le cap AA.
+    tier_sa = [e for e in (list(cal.blackout) + list(cal.proximity))
+               if e.tier in (EventTier.S, EventTier.A) and e.currency in sides]
+    if tier_sa:
+        names = ", ".join(f"{e.currency} {e.event_name}" for e in tier_sa[:2])
         return Flag("C3", "major",
                     f"Risque calendaire élevé (MACRO={fv.get('f7_macro'):.2f}) : {names}")
     return None
