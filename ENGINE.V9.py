@@ -2287,6 +2287,7 @@ function downloadHtml(){
   <span>Universe <strong>{{n_passed}}/{{n_total}}</strong></span>
   <span>Event Risk : <strong style="color:{% if event_risk == 'High' %}var(--red){% elif event_risk == 'Medium' %}#EA580C{% else %}var(--green){% endif %}">{{event_risk}}</strong></span>
   {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
+  {% if sr_degraded %}<span style="background:var(--card);border:1px solid var(--border);color:var(--muted);padding:2px 10px;border-radius:20px">SR indisponible · mode ATR</span>{% endif %}
   <span class="confidential">CONFIDENTIEL</span>
 </div>
 </div><!-- /.page-top -->
@@ -2294,7 +2295,7 @@ function downloadHtml(){
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
-  {% if sr_degraded %}<div class="banner">⚠ Continuation mode — pas de SR overhead qualifié (entrées Market, TP 2×ATR)</div>{% endif %}
+  {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
   <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
   {% for s in setups %}
