@@ -2,31 +2,54 @@
 BLUESTAR ENGINE v10.2.1 -- Streamlit Interface (Ameliore)
 Compatible ENGINE.V9.py (legacy) et ENGINE.V9_v10.2.1.py (corrige)
 """
+import hashlib
 import importlib.util
 import sys
 import tempfile
 import os
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import streamlit as st
 
-# -- Import du moteur (cache_resource pour ne pas recharger a chaque interaction) --
+# -- Traçabilité : hash du fichier moteur (calculé à chaque rerun, hors cache) --
+def _engine_file_hash() -> str:
+    """Retourne les 16 premiers chars du SHA-256 du fichier ENGINE.V9.py.
+
+    Appelé à chaque rerun Streamlit (hors cache_resource). Coût < 5 ms.
+    Retourne 'unavailable' si le fichier est introuvable — jamais bloquant.
+    """
+    try:
+        path = Path(__file__).parent / "ENGINE.V9.py"
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "unavailable"
+
+
+# -- Import du moteur avec invalidation automatique par hash --
+# AVANT : _load_engine()            — clé de cache constante → ancienne version
+#         possible en mémoire après modification du fichier, sans avertissement.
+# APRÈS : _load_engine(file_hash)   — le hash EST la clé de cache.
+#         ENGINE.V9.py modifié → hash différent → rechargement automatique.
+#         Fichier inchangé → même hash → entrée existante réutilisée (0 coût).
 @st.cache_resource(show_spinner=False)
-def _load_engine():
+def _load_engine(file_hash: str):  # noqa: ARG001 — file_hash = clé de cache uniquement
     here = Path(__file__).parent
     path = here / "ENGINE.V9.py"
     if not path.exists():
         return None, None
     spec = importlib.util.spec_from_file_location("bluestar_engine", path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["bluestar_engine"] = mod
+    # Clé sys.modules suffixée par le hash : évite les collisions entre deux
+    # versions cohabitant en mémoire durant un cycle de transition (Python ≥ 3.12).
+    sys.modules[f"bluestar_engine_{file_hash}"] = mod
+    mod.__name__ = f"bluestar_engine_{file_hash}"
     spec.loader.exec_module(mod)
     return mod, "ENGINE.V9.py"
 
 
-_engine_mod, _engine_name = _load_engine()
+_engine_mod, _engine_name = _load_engine(_engine_file_hash())
 
 # -- Config page --
 st.set_page_config(
@@ -44,7 +67,15 @@ with st.sidebar:
     if _engine_mod is None:
         st.error("Moteur introuvable")
     else:
-        st.success(f"Moteur charge : {_engine_name}")
+        # PATCH-TRACE : bandeau d'identité moteur (traçabilité uniquement)
+        _ver  = getattr(_engine_mod, "__version__",  "inconnu")
+        _hash = getattr(_engine_mod, "__file_hash__", "inconnu")
+        _lat  = getattr(_engine_mod, "__loaded_at__", None)
+        _lat_str = _lat.strftime("%Y-%m-%d %H:%M UTC") if _lat else "inconnu"
+        st.success(f"Moteur : {_engine_name}")
+        st.caption(f"Version  `{_ver}`")
+        st.caption(f"Hash     `{_hash[:8] if _hash != 'inconnu' else 'inconnu'}`")
+        st.caption(f"Chargé   `{_lat_str}`")
 
     st.divider()
     st.markdown("### Pipeline")
@@ -65,7 +96,9 @@ with st.sidebar:
     if st.button("Vider le cache", use_container_width=True):
         st.cache_resource.clear()
         st.cache_data.clear()
-        st.success("Cache vide. Rechargez la page.")
+        # PATCH-TRACE : le rerun suivant va recalculer le hash et recharger le moteur.
+        st.success("Cache vide — moteur rechargé au prochain rerun.")
+        st.rerun()
 
 
 # -- Header --
