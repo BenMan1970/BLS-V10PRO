@@ -44,6 +44,39 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 logger = logging.getLogger("bluestar.v10")
 
 # ════════════════════════════════════════════════════════════════════════════
+# SECTION 0-A — IDENTITÉ DU MOTEUR  (traçabilité — aucun impact métier)
+# ════════════════════════════════════════════════════════════════════════════
+__version__: str = "10.2.2"
+"""Version sémantique du moteur. Incrémenter manuellement à chaque release."""
+
+def _compute_self_hash() -> str:
+    """SHA-256 du fichier source du moteur (16 premiers caractères).
+
+    Calculé une seule fois au chargement du module. Permet à l'interface
+    Streamlit de détecter toute modification du fichier entre deux cycles
+    sans redémarrer le serveur. Ne lit que __file__ — aucun I/O externe.
+    Jamais bloquant : retourne 'unavailable' si le fichier est introuvable
+    (e.g. module chargé depuis un zip ou un egg).
+    """
+    try:
+        src = os.path.abspath(__file__)
+        with open(src, "rb") as _f:
+            return hashlib.sha256(_f.read()).hexdigest()[:16]
+    except Exception:  # noqa: BLE001
+        return "unavailable"
+
+__file_hash__: str = _compute_self_hash()
+"""Hash SHA-256 (16 chars) du fichier source au moment du chargement."""
+
+__loaded_at__: datetime = datetime.now(timezone.utc)
+"""Timestamp UTC de chargement du module dans le processus Python en cours."""
+
+logger.info(
+    "ENGINE loaded — version=%s hash=%s loaded_at=%s",
+    __version__, __file_hash__, __loaded_at__.isoformat(),
+)
+
+# ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
 # FIX-E01: import merge_appbackup supprimé (module inexistant, _HAS_UPSTREAM inutilisé)
@@ -1875,8 +1908,17 @@ def run_pipeline(
         universe, preflight_rejects, ranked, final)
 
     # 12 — render (HTML)
+    # PATCH-TRACE: stamp d'identité moteur injecté dans le footer (traçabilité uniquement).
+    # Les trois constantes sont définies en Section 0-A du présent fichier.
+    # Référence directe (pas d'import dynamique) — fiable même sous exec_module.
+    _stamp = {
+        "version": __version__,
+        "hash": __file_hash__,
+        "loaded_at": __loaded_at__.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
-                         n_passed=len(universe.passed), cfg=config)
+                         n_passed=len(universe.passed), cfg=config,
+                         engine_stamp=_stamp)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
@@ -2386,7 +2428,7 @@ function downloadHtml(){
 </div>
 
 </div>
-<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
+<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage{% if engine_stamp %} · ENGINE v{{engine_stamp.version}} #{{engine_stamp.hash}} loaded {{engine_stamp.loaded_at}}{% endif %}</div>
 </div>
 </body></html>"""
 
@@ -2403,7 +2445,15 @@ def _get_template() -> jinja2.Template:
 
 def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
                   clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
-                  n_passed: int, cfg: V4Config = CONFIG) -> str:
+                  n_passed: int, cfg: V4Config = CONFIG,
+                  engine_stamp: Optional[dict] = None) -> str:
+    """Génère le rapport HTML.
+
+    engine_stamp (optionnel) : dict avec clés 'version', 'hash', 'loaded_at'
+    injecté dans le footer du rapport pour traçabilité. Aucun impact sur les
+    scores, signaux ou convictions. Si absent, le footer reste identique à
+    l'original.
+    """
     risk = "Low"
     if calendar:
         if calendar.blackout:
@@ -2426,6 +2476,7 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         event_risk=risk, themes=theme_str, sr_degraded=sr_degraded,
         setups=setups, elimines=eliminated,
         max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
+        engine_stamp=engine_stamp or {},
     )
 
 
