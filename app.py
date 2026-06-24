@@ -39,13 +39,16 @@ def _load_engine(file_hash: str):  # noqa: ARG001 — file_hash = clé de cache 
     path = here / "ENGINE.V9.py"
     if not path.exists():
         return None, None
+    # Le nom dans spec_from_file_location doit rester stable.
+    # Python 3.14 vérifie mod.__name__ == spec.name dans _check_name_wrapper :
+    # modifier __name__ avant exec_module lève ImportError. On enregistre
+    # sous la clé hashée APRÈS exec_module, sans toucher à __name__.
     spec = importlib.util.spec_from_file_location("bluestar_engine", path)
     mod = importlib.util.module_from_spec(spec)
-    # Clé sys.modules suffixée par le hash : évite les collisions entre deux
-    # versions cohabitant en mémoire durant un cycle de transition (Python ≥ 3.12).
-    sys.modules[f"bluestar_engine_{file_hash}"] = mod
-    mod.__name__ = f"bluestar_engine_{file_hash}"
+    sys.modules["bluestar_engine"] = mod  # nom stable requis par exec_module
     spec.loader.exec_module(mod)
+    # Alias hashé : permet la cohabitation de versions en mémoire.
+    sys.modules[f"bluestar_engine_{file_hash}"] = mod
     return mod, "ENGINE.V9.py"
 
 
