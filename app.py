@@ -181,6 +181,23 @@ if merged_file:
             st.error(f"Erreur lecture : {e}")
 
 # -- Bouton run --
+# -- PATCH-PROV (CAUSE RACINE #1) : cle de provenance des entrees courantes --
+# Lie l'affichage du rapport aux inputs televerses. Aucune logique metier touchee.
+def _inputs_fingerprint(mf, cf) -> str:
+    h = hashlib.sha256()
+    h.update(mf.getvalue() if mf else b"")
+    h.update(b"|")
+    h.update(cf.getvalue() if cf else b"")
+    return h.hexdigest()
+
+_cur_fp = _inputs_fingerprint(merged_file, calendar_file) if merged_file else None
+
+# Invalidation : si les entrees ont change depuis la derniere generation reussie,
+# on purge la sortie memorisee AVANT tout affichage (sinon rapport perime affiche).
+if _cur_fp != st.session_state.get("report_fingerprint"):
+    st.session_state.pop("report_html", None)
+    st.session_state.pop("report_base_name", None)
+
 run_disabled = merged_file is None
 if st.button("Generer le rapport", type="primary", use_container_width=True, disabled=run_disabled):
     if not merged_file:
@@ -206,6 +223,9 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                 kwargs = {
                     "merged_path": merged_path,
                     "output_path": output_path,
+                    # PATCH-IO (CAUSE RACINE #2) : confine l'ecriture PDF/fallback au
+                    # tmpdir. Sans ceci, run_pipeline ecrit un artefact date dans le CWD.
+                    "pdf_path": os.path.join(tmpdir, "report.pdf"),
                 }
                 if calendar_path:
                     kwargs["calendar_json_path"] = calendar_path
@@ -220,6 +240,7 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                     _rd = datetime.now().strftime("%Y.%m.%d")
                 st.session_state["report_base_name"] = f"BLUESTAR FX Desk_Signal Report_{_rd}"
                 st.session_state["report_html"] = html
+                st.session_state["report_fingerprint"] = _cur_fp  # PATCH-PROV
                 st.success("Rapport genere avec succes")
 
             except Exception as e:  # noqa: BLE001  # pylint: disable=broad-exception-caught
