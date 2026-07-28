@@ -489,6 +489,11 @@ class SetupV4(BaseModel):
     reject_detail: Optional[str] = None
     # FIX-PRICE-PAST-TP: prix courant au moment du scan, utilisé par preflight
     current_price: float = 0.0
+    # PATCH-ASSETCLASS (audit comité 27/07/2026) : ported from CanonicalAsset,
+    # perdu jusqu'ici entre l'ingestion et le rendu HTML. Défaut "forex"
+    # identique au défaut de CanonicalAsset.asset_class — zéro régression pour
+    # tout appelant qui ignorait déjà ce champ.
+    asset_class: str = "forex"
 
 
 class Universe(BaseModel):
@@ -508,6 +513,8 @@ class Eliminated(BaseModel):
     age_d1: int = 0
     cal_status: CalStatus = CalStatus.OK
     rr: Optional[float] = None
+    # PATCH-ASSETCLASS (audit comité 27/07/2026) : cf. SetupV4.asset_class.
+    asset_class: str = "forex"
 
 
 @dataclass
@@ -1764,6 +1771,9 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         factor_scores=fs,
         # FIX-PRICE-PAST-TP: snapshot du prix courant pour validation dans preflight
         current_price=(a.current_price or 0.0),
+        # PATCH-ASSETCLASS : propage la classification déjà connue de a (JSON
+        # merge), plutôt que de la laisser au défaut "forex" silencieux.
+        asset_class=a.asset_class,
     )
 
 
@@ -1851,7 +1861,7 @@ def run_pipeline(
     config: V4Config = CONFIG,
 ) -> str:
     # 1 — ingestion
-    meta, assets = load_merged(merged_path)
+    meta, assets, correlation_groups = load_merged(merged_path)
     if calendar_path and not calendar_json_path:
         raise NotImplementedError(
             "HTML calendar parsing is delegated upstream; pass --calendar-json.")
@@ -1887,7 +1897,8 @@ def run_pipeline(
 
     # 12 — render (HTML)
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
-                         n_passed=len(universe.passed), cfg=config)
+                         n_passed=len(universe.passed), cfg=config,
+                         correlation_groups=correlation_groups)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
@@ -1912,6 +1923,8 @@ def _collect_eliminated(universe: Universe) -> list[Eliminated]:
             reject_code=code.value, reject_detail=detail,
             rsi_h4=(_safe_float(h4.get("value")) if isinstance(h4, dict) else None),
             age_d1=((m.age_d1 or 0) if m else 0),
+            # PATCH-ASSETCLASS : `asset` (CanonicalAsset) est déjà en scope ici.
+            asset_class=asset.asset_class,
         ))
     return out
 
@@ -1922,13 +1935,15 @@ def _eliminated_from_setups(setups: list[SetupV4]) -> list[Eliminated]:
         reject_code=(s.reject_code or "CLUSTER_DUP"),
         reject_detail=(s.reject_detail or s.capped_reason or "non-représentant cluster"),
         rsi_h4=s.rsi_h4, age_d1=s.age_d1, cal_status=s.cal_status, rr=s.rr,
+        # PATCH-ASSETCLASS : s (SetupV4) porte déjà le champ depuis _make_draft.
+        asset_class=s.asset_class,
     ) for s in setups]
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 15 — INGESTION  (ported from v9)
 # ════════════════════════════════════════════════════════════════════════════
-def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]:
+def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset], dict]:
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
@@ -1950,7 +1965,14 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset]]
             assets[sym] = CanonicalAsset.model_validate(a)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             logger.warning("asset %s skipped: %s", sym, exc)
-    return meta, assets
+    # PATCH-CORRGROUPS (audit comité 27/07/2026) : correlation_groups existe
+    # dans le JSON merge depuis toujours mais n'était jamais lu — perdu à
+    # l'ingestion, pas seulement au rendu. Passage brut (dict), jamais
+    # bloquant si absent ou malformé : c'est une donnée d'appoint pour le
+    # comité en aval, pas une entrée qui conditionne le scoring V4.
+    raw_corr = raw.get("correlation_groups")
+    correlation_groups: dict = raw_corr if isinstance(raw_corr, dict) else {}
+    return meta, assets, correlation_groups
 
 
 def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
@@ -2075,6 +2097,7 @@ body{background:var(--bg);color:var(--body);font-family:var(--sans);font-size:12
 .dir{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:4px;font-size:10.5px;font-weight:700;font-family:var(--mono)}
 .dir.long{background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-tx)}
 .dir.short{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx)}
+.dir.neutral{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--sec)}
 .conv{display:inline-flex;padding:2px 9px;border-radius:4px;font-size:10.5px;font-weight:700;font-family:var(--mono)}
 .conv.aaa{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal)}
 .conv.aa{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal-mid)}
@@ -2318,7 +2341,7 @@ function downloadHtml(){
   {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
   {% set cv = s.conviction.value|lower %}
   {% set fs = s.factor_scores %}
-  <div class="setup {{cv}}">
+  <div class="setup {{cv}}" data-asset-class="{{s.asset_class}}">
     <div class="setup-hdr {{dc}}">
       <span class="pair">{{s.symbol}}</span>
       <span class="dir {{dc}}">{{arrow}} {{s.direction.value}}</span>
@@ -2375,7 +2398,8 @@ function downloadHtml(){
   <div class="sub-lbl">SUSPENDUS — Calendrier ({{suspendus|length}})</div>
   <div class="sus-grid">
   {% for e in suspendus %}
-  <div class="sus-item"><span class="sus-item-pair">{{e.symbol}}</span><span class="sus-item-txt">RSI H4 : {{e.rsi_h4|round(2) if e.rsi_h4 else '—'}} · Age : {{e.age_d1}}j</span></div>
+  {% set dc = 'long' if e.direction.value == 'Bullish' else ('short' if e.direction.value == 'Bearish' else 'neutral') %}
+  <div class="sus-item" data-asset-class="{{e.asset_class}}"><span class="sus-item-pair">{{e.symbol}}</span><span class="dir {{dc}}" style="font-size:9px;padding:1px 5px">{{e.direction.value}}</span><span class="sus-item-txt">{{e.reject_detail}} · RSI H4 : {{e.rsi_h4|round(2) if e.rsi_h4 else '—'}} · Age : {{e.age_d1}}j</span><span class="reject-code" style="display:none">{{e.reject_code}}</span></div>
   {% endfor %}
   </div>
   <hr class="div">
@@ -2386,8 +2410,8 @@ function downloadHtml(){
     <thead><tr><th>Paire</th><th>Dir.</th><th>Code</th><th>Détail</th><th>RSI H4</th><th>Age</th><th>Cal.</th></tr></thead>
     <tbody>
     {% for e in rejets %}
-    {% set dc = 'long' if e.direction.value == 'Bullish' else 'short' %}
-    <tr><td style="font-family:var(--mono);font-weight:700">{{e.symbol}}</td><td><span class="dir {{dc}}" style="font-size:9.5px;padding:1px 6px">{{e.direction.value}}</span></td><td class="reject-code">{{e.reject_code}}</td><td style="font-size:10px">{{e.reject_detail}}</td><td style="font-family:var(--mono);font-size:10px">{{e.rsi_h4|round(2) if e.rsi_h4 else '—'}}</td><td style="font-family:var(--mono);font-size:10px">{{e.age_d1}}j</td><td><span class="cal-{{e.cal_status.value|lower}}" style="font-size:9.5px;padding:1px 6px">{{e.cal_status.value}}</span></td></tr>
+    {% set dc = 'long' if e.direction.value == 'Bullish' else ('short' if e.direction.value == 'Bearish' else 'neutral') %}
+    <tr data-asset-class="{{e.asset_class}}"><td style="font-family:var(--mono);font-weight:700">{{e.symbol}}</td><td><span class="dir {{dc}}" style="font-size:9.5px;padding:1px 6px">{{e.direction.value}}</span></td><td class="reject-code">{{e.reject_code}}</td><td style="font-size:10px">{{e.reject_detail}}</td><td style="font-family:var(--mono);font-size:10px">{{e.rsi_h4|round(2) if e.rsi_h4 else '—'}}</td><td style="font-family:var(--mono);font-size:10px">{{e.age_d1}}j</td><td><span class="cal-{{e.cal_status.value|lower}}" style="font-size:9.5px;padding:1px 6px">{{e.cal_status.value}}</span></td></tr>
     {% endfor %}
     </tbody>
   </table>
@@ -2398,6 +2422,7 @@ function downloadHtml(){
 
 </div>
 <div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
+<script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
 </div>
 </body></html>"""
 
@@ -2414,7 +2439,8 @@ def _get_template() -> jinja2.Template:
 
 def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
                   clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
-                  n_passed: int, cfg: V4Config = CONFIG) -> str:
+                  n_passed: int, cfg: V4Config = CONFIG,
+                  correlation_groups: Optional[dict] = None) -> str:
     risk = "Low"
     if calendar:
         if calendar.blackout:
@@ -2428,6 +2454,10 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
     sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
     date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
+    # PATCH-CORRGROUPS : sérialisé une seule fois ici, jamais dans le
+    # template — cf. principe "le HTML n'est jamais une source de vérité
+    # calculée, seulement un support d'affichage/transport".
+    corr_json = json.dumps(correlation_groups or {}, ensure_ascii=False).replace("</", "<\\/")
     return _get_template().render(
         date_hdr=clock.date_hdr,
         date_hdr_file=date_hdr_file,
@@ -2437,6 +2467,7 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         event_risk=risk, themes=theme_str, sr_degraded=sr_degraded,
         setups=setups, elimines=eliminated,
         max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
+        correlation_groups_json=corr_json,
     )
 
 
