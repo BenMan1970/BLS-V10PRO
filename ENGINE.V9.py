@@ -24,6 +24,7 @@ st.set_page_config(
 
 # -- Détection dynamique du fichier moteur --
 def _find_engine_file() -> Optional[Path]:
+    """Cherche la version la plus récente du moteur pour éviter les régressions de nommage."""
     here = Path(__file__).parent
     for name in ("ENGINE.V10.py", "ENGINE.V9.py", "ENGINE.py"):
         p = here / name
@@ -33,7 +34,11 @@ def _find_engine_file() -> Optional[Path]:
 
 _engine_path = _find_engine_file()
 
+# -- Traçabilité : hash du fichier moteur (calculé à chaque rerun, hors cache) --
 def _engine_file_hash() -> str:
+    """Retourne les 16 premiers chars du SHA-256 du fichier moteur.
+    Retourne 'unavailable' si le fichier est introuvable — jamais bloquant.
+    """
     if not _engine_path:
         return "unavailable"
     try:
@@ -41,23 +46,19 @@ def _engine_file_hash() -> str:
     except OSError:
         return "unavailable"
 
-# -- Import du moteur avec gestion d'erreur explicite --
+# -- Import du moteur avec invalidation automatique par hash --
 @st.cache_resource(show_spinner=False)
-def _load_engine(file_hash: str, engine_path: Path):
+def _load_engine(file_hash: str, engine_path: Path):  # noqa: ARG001
     if not engine_path:
-        return None, None, "Fichier moteur introuvable. Attendu: ENGINE.V10.py ou ENGINE.V9.py à la racine du repo."
-    try:
-        spec = importlib.util.spec_from_file_location("bluestar_engine", engine_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["bluestar_engine"] = mod
-        spec.loader.exec_module(mod)
-        sys.modules[f"bluestar_engine_{file_hash}"] = mod
-        return mod, engine_path.name, None
-    except Exception as e:
-        # On capture l'erreur exacte (ex: ModuleNotFoundError) sans planter l'app
-        return None, None, f"Erreur de chargement du moteur:\n\n{e}"
+        return None, None
+    spec = importlib.util.spec_from_file_location("bluestar_engine", engine_path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["bluestar_engine"] = mod
+    spec.loader.exec_module(mod)
+    sys.modules[f"bluestar_engine_{file_hash}"] = mod
+    return mod, engine_path.name
 
-_engine_mod, _engine_name, _engine_err = _load_engine(_engine_file_hash(), _engine_path)
+_engine_mod, _engine_name = _load_engine(_engine_file_hash(), _engine_path)
 
 # -- Sidebar --
 with st.sidebar:
@@ -65,7 +66,7 @@ with st.sidebar:
     st.caption("FX Institutional Desk - v10 HYBRID V4")
 
     if _engine_mod is None:
-        st.error("Moteur introuvable ou erreur de chargement")
+        st.error("Moteur introuvable. Attendu: ENGINE.V10.py ou ENGINE.V9.py")
     else:
         _ver  = getattr(_engine_mod, "__version__",  "inconnu")
         _hash = getattr(_engine_mod, "__file_hash__", "unavailable")
@@ -104,10 +105,7 @@ st.title("BLUESTAR ENGINE v10.2.1")
 st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
 
 if _engine_mod is None:
-    st.error("Le moteur n'a pas pu être chargé.")
-    if _engine_err:
-        st.code(_engine_err, language='python')
-        st.info("Si l'erreur est `ModuleNotFoundError`, ajoute le module manquant dans `requirements.txt`.")
+    st.error("Moteur introuvable. Vérifiez que ENGINE.V10.py est dans le repo.")
     st.stop()
 
 run_pipeline = _engine_mod.run_pipeline
@@ -134,7 +132,7 @@ with col2:
         ),
     )
 
-# Lecture unique en mémoire
+# Lecture unique en mémoire pour éviter les décalages de pointeurs
 merged_bytes = merged_file.getvalue() if merged_file else None
 calendar_bytes = calendar_file.getvalue() if calendar_file else None
 
@@ -154,9 +152,12 @@ if merged_bytes:
             scanners = meta.get("scanners_detected", [])
             c4.metric("Scanners", ", ".join(scanners)[:30] if scanners else "N/A")
 
+            # Validation version schema (FIX-E02) - Robuste
             version = meta.get("version", "")
             if version:
                 try:
+                    # Padding pour garantir la comparaison de tuples de même longueur
+                    # ex: "3.4" devient (3, 4, 0) au lieu de (3, 4) qui est < (3, 4, 0) en Python
                     v_parts = tuple(int(x) for x in (version.split(".") + ["0", "0"])[:3])
                     min_v = (3, 4, 0)
                     if v_parts < min_v:
@@ -187,6 +188,7 @@ def _inputs_fingerprint(m_bytes: bytes, c_bytes: bytes) -> str:
 
 _cur_fp = _inputs_fingerprint(merged_bytes, calendar_bytes) if merged_file else None
 
+# Invalidation : purge de la sortie si les entrees ont change
 if _cur_fp != st.session_state.get("report_fingerprint"):
     st.session_state.pop("report_html", None)
     st.session_state.pop("report_base_name", None)
@@ -224,6 +226,7 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
 
                 html = run_pipeline(**kwargs)
 
+                # Extraction de la date du rapport
                 try:
                     _ga = json.loads(merged_bytes.decode("utf-8")).get("meta", {}).get("generated_at", "")
                     _rd = datetime.fromisoformat(_ga.replace("Z", "+00:00")).strftime("%Y.%m.%d")
@@ -234,6 +237,7 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                 st.session_state["report_html"] = html
                 st.session_state["report_fingerprint"] = _cur_fp
                 
+                # FIX: Sauvegarde du PDF en mémoire AVANT destruction du tmpdir
                 pdf_bytes = None
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f_pdf:
@@ -292,3 +296,14 @@ if "report_html" in st.session_state:
 
 else:
     st.info("Upload le fichier merged JSON pour lancer le pipeline.")
+    st.markdown("""
+    **Fichiers requis :**
+    - bluestar_merged_YYYYMMDD_HHMMutc.json -- output du merge engine (v3.4.3+)
+
+    **Fichiers optionnels :**
+    - calendar.json -- calendrier economique parse (Forex Factory)
+
+    **Notes :**
+    - Sans calendrier, le pipeline tourne en mode dégradé : F7 MACRO = 1.0, pas de blackout.
+    - Le moteur V10 gère nativement la détection d'incohérence de fuseau (P0-A) et le régime macro (P1-C).
+    """)
