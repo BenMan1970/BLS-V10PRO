@@ -8,9 +8,10 @@ import sys
 import tempfile
 import os
 import json
+import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import streamlit as st
 
@@ -22,6 +23,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# -- Logging explicite pour le diagnostic Streamlit Cloud --
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("bluestar.app")
+
 # -- Détection dynamique du fichier moteur --
 def _find_engine_file() -> Optional[Path]:
     """Cherche la version la plus récente du moteur pour éviter les régressions de nommage."""
@@ -29,53 +34,61 @@ def _find_engine_file() -> Optional[Path]:
     for name in ("ENGINE.V10.py", "ENGINE.V9.py", "ENGINE.py"):
         p = here / name
         if p.exists():
+            logger.info(f"Moteur detecte : {p}")
             return p
+    logger.warning("Aucun fichier moteur detecte (ENGINE.V10.py, ENGINE.V9.py, ENGINE.py)")
     return None
 
-_engine_path = _find_engine_file()
-
-# -- Traçabilité : hash du fichier moteur (calculé à chaque rerun, hors cache) --
-def _engine_file_hash() -> str:
+@st.cache_data(show_spinner=False)
+def _engine_file_hash(engine_path: Optional[Path]) -> str:
     """Retourne les 16 premiers chars du SHA-256 du fichier moteur.
-    Retourne 'unavailable' si le fichier est introuvable — jamais bloquant.
+    Mis en cache pour éviter de relire le disque à chaque rerun.
     """
-    if not _engine_path:
+    if not engine_path:
         return "unavailable"
     try:
-        return hashlib.sha256(_engine_path.read_bytes()).hexdigest()[:16]
-    except OSError:
+        return hashlib.sha256(engine_path.read_bytes()).hexdigest()[:16]
+    except OSError as exc:
+        logger.error(f"Erreur lecture hash moteur : {exc}")
         return "unavailable"
 
-# -- Import du moteur avec invalidation automatique par hash --
 @st.cache_resource(show_spinner=False)
-def _load_engine(file_hash: str, engine_path: Path):  # noqa: ARG001
+def _load_engine(file_hash: str, engine_path: Optional[Path]) -> Tuple[Optional[object], Optional[str], Optional[str]]:
+    """Charge le moteur dynamiquement. Retourne (module, nom_fichier, message_erreur)."""
     if not engine_path:
-        return None, None
-    spec = importlib.util.spec_from_file_location("bluestar_engine", engine_path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["bluestar_engine"] = mod
-    spec.loader.exec_module(mod)
-    sys.modules[f"bluestar_engine_{file_hash}"] = mod
-    return mod, engine_path.name
+        return None, None, "Moteur introuvable. Attendu: ENGINE.V10.py ou ENGINE.V9.py"
+    try:
+        spec = importlib.util.spec_from_file_location("bluestar_engine", engine_path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["bluestar_engine"] = mod
+        spec.loader.exec_module(mod)
+        sys.modules[f"bluestar_engine_{file_hash}"] = mod
+        logger.info(f"Moteur charge avec succes : {engine_path.name}")
+        return mod, engine_path.name, None
+    except Exception as exc:
+        logger.exception("Echec du chargement du moteur")
+        return None, None, f"Erreur chargement moteur : {exc}"
 
-_engine_mod, _engine_name = _load_engine(_engine_file_hash(), _engine_path)
-
-# -- Sidebar --
+# -- Sidebar & état moteur --
 with st.sidebar:
     st.markdown("### BLUESTAR SYSTEM")
     st.caption("FX Institutional Desk - v10 HYBRID V4")
 
-    if _engine_mod is None:
-        st.error("Moteur introuvable. Attendu: ENGINE.V10.py ou ENGINE.V9.py")
+    _engine_path = _find_engine_file()
+    _hash = _engine_file_hash(_engine_path)
+    _engine_mod, _engine_name, _engine_err = _load_engine(_hash, _engine_path)
+
+    if _engine_err:
+        st.error(_engine_err)
     else:
-        _ver  = getattr(_engine_mod, "__version__",  "inconnu")
-        _hash = getattr(_engine_mod, "__file_hash__", "unavailable")
-        _lat  = getattr(_engine_mod, "__loaded_at__", None)
+        _ver = getattr(_engine_mod, "__version__", "inconnu")
+        _mod_hash = getattr(_engine_mod, "__file_hash__", "unavailable")
+        _lat = getattr(_engine_mod, "__loaded_at__", None)
         _lat_str = _lat.strftime("%Y-%m-%d %H:%M UTC") if _lat else "inconnu"
-        
+
         st.success(f"Moteur : {_engine_name}")
         st.caption(f"Version  `{_ver}`")
-        st.caption(f"Hash     `{_hash[:8] if _hash != 'unavailable' else 'inconnu'}`")
+        st.caption(f"Hash     `{_mod_hash[:8] if _mod_hash != 'unavailable' else 'inconnu'}`")
         st.caption(f"Chargé   `{_lat_str}`")
 
     st.divider()
@@ -104,8 +117,18 @@ with st.sidebar:
 st.title("BLUESTAR ENGINE v10.2.1")
 st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
 
-if _engine_mod is None:
-    st.error("Moteur introuvable. Vérifiez que ENGINE.V10.py est dans le repo.")
+# -- Vérification moteur (sans st.stop() qui peut être brutal dans certains runners Cloud) --
+engine_ready = _engine_mod is not None and _engine_err is None
+if not engine_ready:
+    st.error(
+        "🚨 **Moteur introuvable ou corrompu.**\n\n"
+        "Vérifiez que `ENGINE.V10.py` (ou `ENGINE.V9.py`) est bien présent "
+        "à la racine du repo et qu'il ne contient pas d'erreur de syntaxe au niveau module."
+    )
+    st.info(
+        "Si le fichier est présent mais lourd (imports ML/data au top-level), "
+        "déplacez ces imports à l'intérieur des fonctions pour accélérer le chargement."
+    )
     st.stop()
 
 run_pipeline = _engine_mod.run_pipeline
@@ -156,8 +179,6 @@ if merged_bytes:
             version = meta.get("version", "")
             if version:
                 try:
-                    # Padding pour garantir la comparaison de tuples de même longueur
-                    # ex: "3.4" devient (3, 4, 0) au lieu de (3, 4) qui est < (3, 4, 0) en Python
                     v_parts = tuple(int(x) for x in (version.split(".") + ["0", "0"])[:3])
                     min_v = (3, 4, 0)
                     if v_parts < min_v:
@@ -232,18 +253,18 @@ if st.button("Generer le rapport", type="primary", use_container_width=True, dis
                     _rd = datetime.fromisoformat(_ga.replace("Z", "+00:00")).strftime("%Y.%m.%d")
                 except Exception:
                     _rd = datetime.now().strftime("%Y.%m.%d")
-                
+
                 st.session_state["report_base_name"] = f"BLUESTAR FX Desk_Signal Report_{_rd}"
                 st.session_state["report_html"] = html
                 st.session_state["report_fingerprint"] = _cur_fp
-                
+
                 # FIX: Sauvegarde du PDF en mémoire AVANT destruction du tmpdir
                 pdf_bytes = None
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f_pdf:
                         pdf_bytes = f_pdf.read()
                 st.session_state["report_pdf_bytes"] = pdf_bytes
-                
+
                 st.success("Rapport généré avec succès")
 
             except Exception as e:
@@ -272,7 +293,7 @@ if "report_html" in st.session_state:
     _pdf_data = st.session_state.get("report_pdf_bytes")
 
     col_dl1, col_dl2 = st.columns(2)
-    
+
     with col_dl1:
         st.download_button(
             label="Télécharger HTML",
@@ -281,7 +302,7 @@ if "report_html" in st.session_state:
             mime="text/html",
             use_container_width=True,
         )
-    
+
     with col_dl2:
         if _pdf_data:
             st.download_button(
