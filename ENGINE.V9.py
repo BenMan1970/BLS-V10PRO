@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -104,29 +104,12 @@ class CalStatus(str, Enum):
     WATCH = "WATCH"
 
 
-class MacroRegime(str, Enum):
-    """P1-C — macro regime at portfolio level (not per asset)."""
-    EVENT_VACUUM = "EVENT_VACUUM"
-    EVENT_DRIFT = "EVENT_DRIFT"
-    PRE_POLICY_COMPRESSION = "PRE_POLICY_COMPRESSION"
-    POST_POLICY_REPRICING = "POST_POLICY_REPRICING"
-    UNKNOWN = "UNKNOWN"
-
-
-class FreshnessAudit(str, Enum):
-    """P1-B — reconciliation of candles_elapsed vs signal_time."""
-    FRESH = "FRESH"        # verified consistent
-    STALE = "STALE"        # verified INCONSISTENT
-    UNKNOWN = "UNKNOWN"    # unverifiable -> behavior unchanged
-
-
 # Ordinal rank for diversification preference (higher = stronger conviction).
 _CONVICTION_ORDINAL: Mapping[str, int] = MappingProxyType({
     "AAA": 6, "AA": 5, "A": 4, "BBB": 3, "BB": 2, "B": 1,
 })
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — HELPERS  (ported verbatim from v9)
 # ════════════════════════════════════════════════════════════════════════════
@@ -171,75 +154,6 @@ def _opposite_dir(d: Direction) -> Direction:
     return Direction.NEUTRAL
 
 
-def _median(values: Iterable[float]) -> float:
-    """Médiane pure-python déterministe. 0.0 sur séquence vide."""
-    s = sorted(float(v) for v in values)
-    n = len(s)
-    if n == 0:
-        return 0.0
-    mid = n // 2
-    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
-
-
-def _parse_iso_utc(raw: Any) -> Optional[datetime]:
-    """ISO-8601 (suffixe Z toléré) -> datetime aware UTC. None si échec."""
-    if raw is None:
-        return None
-    if isinstance(raw, datetime):
-        return raw.replace(tzinfo=timezone.utc) if raw.tzinfo is None else raw.astimezone(timezone.utc)
-    try:
-        s = str(raw).strip()
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        dt = datetime.fromisoformat(s)
-    except (TypeError, ValueError):
-        return None
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-
-
-# ── P1-B : comptage de bougies FX-aware ─────────────────────────────────────
-# Semaine FX : dimanche 21:00 UTC -> vendredi 21:00 UTC. Un comptage naïf en
-# heures calendaires produirait des faux positifs systématiques le lundi.
-_FX_WEEK_CLOSE_WEEKDAY = 4        # Friday (Monday=0)
-_FX_WEEK_CLOSE_HOUR = 21
-_FX_WEEK_CLOSED_HOURS = 48.0
-
-_TF_ACTIVE_HOURS: Mapping[str, float] = MappingProxyType({
-    "M15": 0.25, "M30": 0.5, "H1": 1.0, "H4": 4.0,
-    "D1": 24.0, "DAILY": 24.0,
-    "W1": 120.0, "WEEKLY": 120.0,
-    "MN": 480.0, "MONTHLY": 480.0,
-})
-
-
-def _fx_active_hours(start: datetime, end: datetime) -> float:
-    """Heures de marché FX ouvertes entre start et end (week-ends exclus)."""
-    if end <= start:
-        return 0.0
-    total = (end - start).total_seconds() / 3600.0
-    anchor = start.replace(hour=_FX_WEEK_CLOSE_HOUR, minute=0, second=0, microsecond=0)
-    anchor -= timedelta(days=(anchor.weekday() - _FX_WEEK_CLOSE_WEEKDAY) % 7)
-    if anchor > start:
-        anchor -= timedelta(days=7)
-    closed = 0.0
-    cur = anchor
-    while cur < end:
-        ov_s = max(cur, start)
-        ov_e = min(cur + timedelta(hours=_FX_WEEK_CLOSED_HOURS), end)
-        if ov_e > ov_s:
-            closed += (ov_e - ov_s).total_seconds() / 3600.0
-        cur += timedelta(days=7)
-    return max(0.0, total - closed)
-
-
-def _elapsed_bars_fx(start: datetime, end: datetime, timeframe: str) -> int:
-    """Bougies CLOSES entre start et end pour le TF donné. -1 si TF inconnu."""
-    bar_h = _TF_ACTIVE_HOURS.get((timeframe or "").upper())
-    if not bar_h or bar_h <= 0:
-        return -1
-    return int(_fx_active_hours(start, end) / bar_h)
-
-
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 3 — CALENDAR MODELS  (ported verbatim from v9 — do not break)
 # ════════════════════════════════════════════════════════════════════════════
@@ -271,8 +185,6 @@ TIER_WINDOWS: Mapping[EventTier, tuple[float, float]] = MappingProxyType({
     EventTier.A: (2.0, 24.0),
     EventTier.B: (1.0, 6.0),
 })
-
-DEFAULT_TIER_WINDOW = (2.0, 24.0)
 PROXIMITY_MAX_H = 48.0
 WATCH_MAX_H = 168.0
 
@@ -318,8 +230,6 @@ class CalendarSets(BaseModel):
     suspended_ccy: set[str] = Field(default_factory=set)
     proximity_ccy: set[str] = Field(default_factory=set)
     watch_ccy: set[str] = Field(default_factory=set)
-    time_degraded: bool = False
-    time_offset_hours: float = 0.0
 
     @model_validator(mode="after")
     def _sets(self) -> "CalendarSets":
@@ -335,62 +245,23 @@ class CalendarData(BaseModel):
     timezone_source: str = "UTC"
     parsed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     raw_html_hash: str = ""
-    time_degraded: bool = False
-    time_offset_hours: float = 0.0
-    time_audit_detail: str = ""
 
     def bucket(self, now: datetime) -> CalendarSets:
-        """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
-        DES DEUX CÔTÉS. Fail-closed délibéré — les deux champs temporels du feed
-        se contredisent, rien ne prouve lequel est correct ; élargir est
-        conservateur dans les deux hypothèses. Corriger datetime_utc par +offset
-        supposerait que hours_until est la vérité : supposition non démontrée.
-        """
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
-        pad = abs(self.time_offset_hours) if self.time_degraded else 0.0
-        prox_max = PROXIMITY_MAX_H + pad
-        watch_max = WATCH_MAX_H + pad
         blackout, proximity, watch = [], [], []
         for ev in self.events:
             if ev.impact != ImpactLevel.HIGH:
                 continue
-            before, after = TIER_WINDOWS.get(ev.tier, DEFAULT_TIER_WINDOW)
-            before += pad
-            after += pad
+            before, after = TIER_WINDOWS.get(ev.tier, (2.0, 24.0))
             delta = (ev.datetime_utc - now).total_seconds() / 3600.0
             if -after <= delta <= before:
                 blackout.append(ev)
-            elif before < delta <= prox_max:
+            elif before < delta <= PROXIMITY_MAX_H:
                 proximity.append(ev)
-            elif prox_max < delta <= watch_max:
+            elif PROXIMITY_MAX_H < delta <= WATCH_MAX_H:
                 watch.append(ev)
-        return CalendarSets(blackout=blackout, proximity=proximity, watch=watch,
-                            time_degraded=self.time_degraded,
-                            time_offset_hours=self.time_offset_hours)
-
-
-def audit_calendar_time_consistency(
-    events_raw: list[dict],
-    generated_at: Optional[datetime],
-    tol_h: float = CAL_TIME_TOL_H,
-) -> tuple[float, int, int]:
-    """P0-A — compare hours_until déclaré et (datetime_utc - generated_at).
-    Retourne (offset_median_h, n_concordants, n_verifiables). MESURE seulement.
-    """
-    if not generated_at:
-        return 0.0, 0, 0
-    offsets: list[float] = []
-    for ev in events_raw or []:
-        hu = _safe_float(ev.get("hours_until"))
-        dt = _parse_iso_utc(ev.get("datetime_utc"))
-        if hu is None or dt is None:
-            continue
-        offsets.append(hu - (dt - generated_at).total_seconds() / 3600.0)
-    if not offsets:
-        return 0.0, 0, 0
-    med = _median(offsets)
-    return med, sum(1 for o in offsets if abs(o - med) <= tol_h), len(offsets)
+        return CalendarSets(blackout=blackout, proximity=proximity, watch=watch)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -430,14 +301,6 @@ class StructureEventView(BaseModel):
     bb_regime: str = "Normal"
     session: str = ""
     candles_elapsed: int = 999
-    signal_time: Optional[datetime] = None
-
-    @field_validator("signal_time")
-    @classmethod
-    def _tz(cls, v: Optional[datetime]) -> Optional[datetime]:
-        if v is None:
-            return None
-        return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
 
     @field_validator("direction", mode="before")
     @classmethod
@@ -572,7 +435,6 @@ class FactorScores(BaseModel):
     absolute_mean: float = 0.0        # score post-decay (utilisé pour conviction + ranking)
     absolute_mean_raw: float = 0.0    # score pré-decay (audit uniquement)
     decay_factor: float = 1.0         # multiplicateur appliqué [DECAY_FLOOR, 1.0]
-    decay_source: str = "age"         # P1-A : source du decay (ex: "age", "universe_median")
     quantile: float = 0.0
     missing: list[str] = Field(default_factory=list)
     details: dict[str, str] = Field(default_factory=dict)
@@ -1222,20 +1084,6 @@ def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
     return max(cfg.DECAY_FLOOR, raw)
 
 
-def resolve_unknown_decay(known_ages: list[int], cfg: V4Config) -> tuple[float, str]:
-    """P1-A — résout le cas de `age_d1 is None`.
-
-    Le comportement historique (`age_d1 or 0` -> decay 1.0) attribuait le bonus
-    de fraîcheur maximal à une absence d'information, contredisant la règle
-    « UNKNOWN > interprétation optimiste ». Substitut : médiane empirique du
-    decay de l'univers du run — déterministe, reproductible, aucune constante
-    en dur. Repli sur DECAY_FLOOR si l'univers ne fournit aucune référence.
-    """
-    if known_ages:
-        return _median([_alpha_decay_factor(a, cfg) for a in known_ages]), "universe_median"
-    return cfg.DECAY_FLOOR, "floor_no_reference"
-
-
 def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     """Pure-python percentile rank of absolute_mean within the universe."""
     means = [(v.symbol, v.absolute_mean) for v in vectors]
@@ -1474,9 +1322,6 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
     bb_regime = ev.bb_regime if ev else "Normal"
     bb_mult = cfg.BB_REGIME_MULT.get(bb_regime, cfg.DEFAULT_BB_MULT)
     if direction is Direction.BULLISH:
-        sl_raw = entry - atr * bb_mult
-    elif direction is Direction.BEARISH:
-        if direction is Direction.BULLISH:
         sl_raw = entry - atr * bb_mult
     elif direction is Direction.BEARISH:
         sl_raw = entry + atr * bb_mult
@@ -2695,5 +2540,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
     
