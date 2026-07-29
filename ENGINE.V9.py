@@ -43,6 +43,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 logger = logging.getLogger("bluestar.v10")
 
+# Bump manuel à chaque changement de comportement de grading/scoring.
+# app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
+__version__ = "10.2.3"  # + C10 (divergence RSI senior contre-tendance)
+
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
@@ -777,6 +781,13 @@ class V4Config:
     MACRO_REGIME_WINDOW_H: float = 48.0   # fenêtre GLISSANTE
     MACRO_REGIME_MIN_S: int = 3           # slots tier-S DISTINCTS
     MACRO_VACUUM_H: float = 120.0
+    # ── C10 — divergence RSI senior contre-tendance (contradiction, pas cap) ─
+    # [CALIBRATION REQUISE] Seuil non calibré. Magnitude minimale
+    # (strength × confidence) d'une divergence senior pour être traitée comme
+    # contradiction structurelle. Discrimine 0.71 (AUD/JPY W1) de 0.10, pas
+    # 0.26 de 0.24.
+    C10_DIV_SENIOR_TFS: tuple = ("W1", "D1")
+    C10_DIV_MIN_EVIDENCE: float = 0.25
     # ── P1-D ────────────────────────────────────────────────────────────────
     INVALIDATION_TIME_MULT: float = 1.5
     # preflight (ported from v9)
@@ -1515,6 +1526,37 @@ def _c9_freshness_mismatch(a: CanonicalAsset, now: Optional[datetime],
     return None
 
 
+def _c10_htf_divergence(a: CanonicalAsset, cfg: V4Config = CONFIG) -> Optional[Flag]:
+    """Divergence RSI confirmée, CONTRAIRE au trade, sur TF senior (W1/D1).
+
+    Source de vérité = a.rsi_by_tf, identique à _divergence_penalty (F2).
+    PAS market_context.momentum_context : ce résumé dérivé ne transporte ni
+    div_strength_score ni div_confidence_score, et vaut None si le merge
+    engine a crashé — dégradation OUVERTE, contraire à la doctrine P0-A.
+    Retourne None si MTF absent ou Neutral -> UNKNOWN, pas de flag inventé.
+    """
+    if a.mtf is None or a.mtf.direction is Direction.NEUTRAL:
+        return None
+    contra = _opposite_dir(a.mtf.direction)
+    hits: list[str] = []
+    for tf in cfg.C10_DIV_SENIOR_TFS:
+        d = (a.rsi_by_tf.get(tf) or a.rsi_by_tf.get(tf.upper())
+             or a.rsi_by_tf.get(tf.lower()))
+        if not isinstance(d, dict) or not d.get("div_confirmed"):
+            continue
+        if _norm_dir(d.get("divergence")) is not contra:
+            continue
+        evidence = ((_safe_float(d.get("div_strength_score")) or 0.0)
+                    * (_safe_float(d.get("div_confidence_score")) or 0.0))
+        if evidence >= cfg.C10_DIV_MIN_EVIDENCE:
+            hits.append(f"{tf}={evidence:.2f}")
+    if not hits:
+        return None
+    return Flag("C10", "major",
+                f"Divergence {contra.value} confirmée contre-tendance sur TF "
+                f"senior ({', '.join(hits)}) — structure > alignement MTF")
+
+
 def detect_contradictions(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
                           cal: Optional[CalendarSets], cfg: V4Config = CONFIG, *,
                           now: Optional[datetime] = None,
@@ -1530,6 +1572,7 @@ def detect_contradictions(a: CanonicalAsset, fv: FactorVector, themes: MarketThe
         _c7_horizon_coherence(horizon, cfg),
         _c8_age_unknown(a),
         _c9_freshness_mismatch(a, now, cfg),
+        _c10_htf_divergence(a, cfg),        # ← ajout (comité de validation)
     ):
         if f is not None:
             flags.append(f)
