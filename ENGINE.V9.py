@@ -45,7 +45,7 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.2.3"  # + C10 (divergence RSI senior contre-tendance)
+__version__ = "10.2.4"  # + C10 (divergence RSI senior) + _TIER_S funds/policy rate
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
@@ -247,7 +247,8 @@ def _elapsed_bars_fx(start: datetime, end: datetime, timeframe: str) -> int:
 # SECTION 3 — CALENDAR MODELS  (ported verbatim from v9 — do not break)
 # ════════════════════════════════════════════════════════════════════════════
 _TIER_S = ("non-farm", "nonfarm", "nfp", "fomc", "cpi", "cash rate",
-           "bank rate", "rate statement", "interest rate", "monetary policy")
+           "bank rate", "rate statement", "interest rate", "monetary policy",
+           "funds rate", "policy rate")
 _TIER_A = ("gdp", "pmi", "adp", "pce", "employment change", "unemployment",
            "average hourly", "retail sales", "ppi")
 _TIER_B = ("speaks", "speech", "press conference", "testifies", "testimony")
@@ -3098,5 +3099,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
