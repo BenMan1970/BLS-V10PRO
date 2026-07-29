@@ -52,11 +52,6 @@ def _load_engine(file_hash: str, engine_path: Path):
         sys.modules["bluestar_engine"] = mod
         spec.loader.exec_module(mod)
         sys.modules[f"bluestar_engine_{file_hash}"] = mod
-        # __version__ vient du module s'il le définit ; __file_hash__ et
-        # __loaded_at__ sont propriétés du CHARGEMENT, pas du fichier source,
-        # donc calculées ici plutôt qu'attendues dans le module.
-        mod.__file_hash__ = file_hash
-        mod.__loaded_at__ = datetime.utcnow()
         return mod, engine_path.name, None
     except Exception as e:
         # On capture l'erreur exacte (ex: ModuleNotFoundError) sans planter l'app
@@ -105,8 +100,7 @@ with st.sidebar:
         st.rerun()
 
 # -- Header --
-_header_ver = getattr(_engine_mod, "__version__", None)
-st.title(f"BLUESTAR ENGINE v{_header_ver}" if _header_ver else "BLUESTAR ENGINE")
+st.title("BLUESTAR ENGINE v10.2.1")
 st.caption("FX Institutional Desk - Hybrid Absolute/Cross-Sectional V4 - Zero Regression")
 
 if _engine_mod is None:
