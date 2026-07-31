@@ -1222,7 +1222,33 @@ def _surprise_factor(ev: CalendarEvent) -> float:
 def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
     if cal is None:
-        return ScoredFactor("f7_macro", None, 1.0, False, "calendrier absent (risque nul)")
+        # PATCH-CALFAILOPEN-F5 (round de validation zero-régression, 31/07/2026) :
+        # ANCIEN comportement : score=1.0 ("risque nul") + is_missing=False.
+        # Une panne du feed calendrier (fetch_raw() retourne [] sur toute
+        # erreur HTTP, cf. calendar_layer.fetch_raw) faisait donc BAISSER
+        # macro_risk = 1.0 - f7_macro (apply_caps, "High macro risk -> AA")
+        # et levait silencieusement tous les caps AA liés au calendrier --
+        # l'inverse exact de la doctrine fail-closed que ce même fichier
+        # revendique explicitement ailleurs (CalendarData.bucket, plus haut :
+        # "Fail-closed délibéré"). Confirmé par l'audit (F5) : contradiction
+        # interne démontrée entre deux endroits du même module.
+        #
+        # NOUVEAU : traité comme un blackout potentiel NON écarté -- même
+        # score (0.0) que la branche "BLACKOUT actif" ci-dessous -- ET
+        # is_missing=True afin que (a) le template HTML affiche déjà
+        # l'indicateur "miss" existant (voir F7 MAC dans le rendu) au lieu
+        # de masquer la dégradation au lecteur, (b) le traitement soit
+        # cohérent avec la sémantique "facteur manquant" utilisée ailleurs.
+        # NB : is_missing=True fait aussi sortir f7_macro de absolute_mean
+        # (propriété FactorVector.absolute_mean) -- comportement partagé
+        # avec tous les autres facteurs manquants (cf. audit F7, non
+        # corrigé ici : changer cette exclusion affecterait les 7 facteurs
+        # pour tous les actifs, pas seulement le cas calendrier-absent, et
+        # exige le rejeu historique ≥60 jours recommandé en V-2/V-3 avant
+        # toute modification -- hors périmètre "chirurgical" de ce correctif).
+        return ScoredFactor("f7_macro", None, 0.0, True,
+                            "calendrier absent — fail-closed (risque NON écarté, "
+                            "pas risque nul)")
     sides = {a.base, (a.quote or "")}
     # Blackout active -> score 0 (hard veto handled in preflight)
     if sides & cal.suspended_ccy:
