@@ -1991,7 +1991,27 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
     kept: list[SetupV4] = []
     kept_meta: list[tuple[str, str, str, set[str], Direction]] = []
 
+    # PATCH-CLUSTERDUP (round du 31/07/2026) : reached_max remplace le
+    # `break` sec précédent. AVANT : dès que len(kept)>=MAX_SETUPS, `break`
+    # sortait de la boucle et tous les représentants restants n'obtenaient
+    # NI reject_code NI capped_reason -- ils tombaient dans le defaulting
+    # "or CLUSTER_DUP" de _eliminated_from_setups(), un jugement faux (ce
+    # n'est ni un doublon de cluster, ni une exposition/corrélation
+    # excessive, juste "après la limite"). Vérifié par exécution (scénario
+    # à 7 setups synthétiques, round du 31/07/2026) : `kept` final identique
+    # avant/après (même contenu, même ordre) -- seul l'étiquetage des
+    # exclusions change. DÉPLOIEMENT ATOMIQUE OBLIGATOIRE avec l'ajout des
+    # routes EXPOSURE_CAP/CORRELATION_CAP/MAX_SETUPS_REACHED dans
+    # selection_grid.py (bluestar.decide) -- sans ça, ces codes tombent sur
+    # le repli (REJECT, "reject_code_inconnu") côté comité, une régression
+    # de sévérité pire que le bug d'origine.
+    reached_max = False
     for s in ranked:
+        if reached_max:
+            s.capped_reason = s.capped_reason or "limite MAX_SETUPS atteinte"
+            s.reject_code = s.reject_code or "MAX_SETUPS_REACHED"
+            continue
+
         base, quote = _split_symbol(s.symbol)
         sign = 1 if s.direction is Direction.BULLISH else -1
 
@@ -1999,6 +2019,7 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
         over_quote = bool(quote) and abs(net[quote] - sign) > cfg.MAX_EXPOSURE_PER_CCY
         if over_base or over_quote:
             s.capped_reason = "exposition devise"
+            s.reject_code = "EXPOSURE_CAP"
             s.cal_note = (s.cal_note + " [capped: exposition devise]").strip()
             continue
 
@@ -2020,6 +2041,7 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
                     break
         if corr_hit:
             s.capped_reason = f"corrélation groupe {corr_hit}"
+            s.reject_code = "CORRELATION_CAP"
             s.cal_note = (s.cal_note + f" [capped: corrélation {corr_hit}]").strip()
             continue
 
@@ -2029,7 +2051,7 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
         kept.append(s)
         kept_meta.append((s.symbol, base, quote, s_groups, s.direction))
         if len(kept) >= cfg.MAX_SETUPS:
-            break
+            reached_max = True
     return kept
 
 
@@ -3099,4 +3121,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
