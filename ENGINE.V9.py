@@ -33,19 +33,37 @@ import math
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, ClassVar, Iterable, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# PATCH-TZ (round du 31/07/2026, audit F-11/C-08) : fuseau d'affichage unique
+# et DST-aware pour TOUT le rendu Desk. L'ancien `timezone(timedelta(hours=1))`
+# codé en dur, doublé du littéral "GMT+1" dans le bandeau, était faux la moitié
+# de l'année (Paris = UTC+2 en heure d'été) et divergeait de la convention de la
+# couche Macro (Europe/Paris via config.TZ_CET). Repli défensif sur l'ancien
+# offset fixe si la base tzdata est absente (Windows sans paquet `tzdata`) :
+# dans ce cas le comportement est STRICTEMENT celui d'avant le patch, une
+# exception à l'import serait une régression bien pire que l'étiquette fausse.
+try:
+    REPORT_TZ: tzinfo = ZoneInfo("Europe/Paris")
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+    REPORT_TZ = timezone(timedelta(hours=1))
 
 logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.2.4"  # + C10 (divergence RSI senior) + _TIER_S funds/policy rate
+__version__ = "10.2.5"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
+                        #   G (troncature du flux calendaire) — round 31/07/2026.
+                        # Bump délibéré : l'audit (F-02) a démontré qu'un artefact
+                        # produit par un binaire non versionné n'est pas datable,
+                        # donc pas auditable a posteriori.
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
@@ -346,6 +364,16 @@ class CalendarData(BaseModel):
     time_degraded: bool = False
     time_offset_hours: float = 0.0
     time_audit_detail: str = ""
+    # PATCH-FEEDHORIZON (round du 31/07/2026, audit F-15) : le flux FF est
+    # HEBDOMADAIRE (ff_calendar_thisweek.json). Un vendredi, l'horizon
+    # prospectif résiduel tombe sous WATCH_MAX_H et le silence calendaire
+    # au-delà n'est PAS une absence de risque — il est indistinguable d'une
+    # absence de données. Détecté et publié, jamais masqué. L'endpoint
+    # multi-semaines n'existe pas chez cet hébergeur (404 vérifié le
+    # 31/07/2026), la visibilité est donc le seul correctif zero-régression
+    # disponible sans changer de fournisseur de données.
+    feed_horizon_truncated: bool = False
+    feed_coverage_detail: str = ""
 
     def bucket(self, now: datetime) -> CalendarSets:
         """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
@@ -508,12 +536,22 @@ class Clock(BaseModel):
     now_local: datetime
     date_hdr: str
 
+    # C-08 (audit 31/07/2026) : fuseau d'affichage unique, DST-aware.
+    # ClassVar est OBLIGATOIRE ici — sans cette annotation, Pydantic v2
+    # traiterait `_REPORT_TZ` (préfixe underscore) comme un attribut privé
+    # et `cls._REPORT_TZ` retournerait un ModelPrivateAttr, pas le fuseau.
+    _REPORT_TZ: ClassVar[tzinfo] = REPORT_TZ
+
     @classmethod
     def from_meta(cls, generated_at: datetime) -> "Clock":
         now_utc = generated_at if generated_at.tzinfo else generated_at.replace(tzinfo=timezone.utc)
-        now_local = now_utc.astimezone(timezone(timedelta(hours=1)))
+        now_local = now_utc.astimezone(cls._REPORT_TZ)
+        # L'étiquette suit le fuseau RÉEL (CET l'hiver, CEST l'été) au lieu du
+        # littéral "GMT+1". L'heure affichée était déjà juste ; c'est l'étiquette
+        # qui mentait. Le scoring reste intégralement ancré sur now_utc.
+        tz_label = now_local.tzname() or "CET"
         return cls(now_utc=now_utc, now_local=now_local,
-                   date_hdr=now_local.strftime("%Y-%m-%d %H:%M GMT+1"))
+                   date_hdr=f"{now_local.strftime('%Y-%m-%d %H:%M')} {tz_label}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -610,6 +648,14 @@ class SetupV4(BaseModel):
     tp2_atr_multiple: Optional[float] = None
     rr: float = 0.0
     rr_synthetic: bool = False
+    # PATCH-SRBADGE (round du 31/07/2026, audit F-10/C-07) : granularité
+    # TP1/TP2 nécessaire au badge SR. `rr_synthetic` (= TP1 OU TP2 synthétique)
+    # masquait un TP2 ancré sur une zone SR réelle — cas EUR/CAD du 31/07 :
+    # TP2 = 1,62543 = zone SELL W1/D1/H4 du merge, mais badge "SR indisponible"
+    # affiché parce que TP1 était synthétique. None = non déterminé (objet
+    # sérialisé sous l'ancien schéma) → le rendu retombe sur la logique legacy.
+    tp1_synthetic: Optional[bool] = None
+    tp2_synthetic: Optional[bool] = None
     atr_effective: float = 0.0
     atr_source: str = "unknown"
     distance_atr: float = 0.0
@@ -2309,6 +2355,7 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         tp1=lv.tp1, tp1_atr_multiple=lv.tp1_atr_multiple,
         tp2=lv.tp2, tp2_atr_multiple=lv.tp2_atr_multiple,
         rr=lv.rr, rr_synthetic=(lv.tp1_synthetic or lv.tp2_synthetic),
+        tp1_synthetic=lv.tp1_synthetic, tp2_synthetic=lv.tp2_synthetic,
         atr_effective=lv.atr_effective, atr_source=lv.atr_source,
         distance_atr=(lv.trigger.distance_atr_multiple or 0.0) if lv.trigger else 0.0,
         choch_score=(lv.trigger.confluence_score if lv.trigger else None),
@@ -2476,7 +2523,9 @@ def run_pipeline(
                          macro_regime=regime,
                          cal_time_degraded=calendar_data.time_degraded,
                          cal_time_offset=calendar_data.time_offset_hours,
-                         cal_time_detail=calendar_data.time_audit_detail)
+                         cal_time_detail=calendar_data.time_audit_detail,
+                         cal_feed_truncated=calendar_data.feed_horizon_truncated,
+                         cal_feed_detail=calendar_data.feed_coverage_detail)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
@@ -2573,6 +2622,10 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     # ── Détection format wrapper Module 04 vs CalendarData natif ────────────
     # Le wrapper contient "metadata" à la racine ; le format natif ne l'a pas.
     is_wrapper = "metadata" in raw_dict
+    # PATCH-FEEDHORIZON : initialisé AVANT la branche — l'audit de troncature
+    # ci-dessous s'exécute sur les deux formats et doit pouvoir lire gen_at
+    # sans NameError sur le chemin natif.
+    gen_at: Optional[datetime] = None
 
     if is_wrapper:
         # R4 : lire events_engine en priorité (passés 72h + futurs),
@@ -2620,6 +2673,28 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
         # Format CalendarData natif : validation directe (comportement original)
         data = CalendarData.model_validate_json(raw)
 
+    # ── PATCH-FEEDHORIZON (round du 31/07/2026, audit F-15) ─────────────────
+    # Horizon réel du flux comparé à la fenêtre WATCH. Aucune décision n'est
+    # modifiée ici : on rend visible une limite de couverture qui était
+    # jusqu'ici silencieuse et indistinguable d'une absence de risque.
+    if data.events:
+        _ref = gen_at if (is_wrapper and gen_at is not None) else data.parsed_at
+        # Défensif : parsed_at n'a pas de validateur de fuseau et un
+        # CalendarData natif mal formé pourrait être naïf. Un TypeError ici
+        # ferait planter tout le pipeline — ce serait une régression.
+        if _ref.tzinfo is None:
+            _ref = _ref.replace(tzinfo=timezone.utc)
+        _feed_end = max(ev.datetime_utc for ev in data.events)
+        _horizon_h = (_feed_end - _ref).total_seconds() / 3600.0
+        if _horizon_h < WATCH_MAX_H:
+            data.feed_horizon_truncated = True
+            data.feed_coverage_detail = (
+                f"dernier événement du flux {_feed_end:%Y-%m-%d %H:%M UTC} "
+                f"= +{_horizon_h:.0f}h < fenêtre WATCH {WATCH_MAX_H:.0f}h — "
+                f"le silence calendaire au-delà n'est PAS une absence de risque"
+            )
+            logger.warning("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
+
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
@@ -2627,7 +2702,10 @@ def report_filename(generated_at: datetime, ext: str) -> str:
     """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=timezone.utc)
-    local = generated_at.astimezone(timezone(timedelta(hours=1)))
+    # C-08 : même fuseau que Clock — l'ancien offset fixe pouvait dater le
+    # fichier d'un jour différent de l'en-tête du rapport entre 23:00 et 00:00
+    # UTC en heure d'été.
+    local = generated_at.astimezone(Clock._REPORT_TZ)  # pylint: disable=protected-access
     return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
 
 
@@ -2763,6 +2841,9 @@ tbody td{padding:5px 10px;vertical-align:middle}
 .confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
 .page-top{display:block}
 
+/* ════════════════════════════════════════════════════════════════════════════
+# SECTION 17 — CLI
+# ════════════════════════════════════════════════════════════════════════════ */
 /* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD ═══════════════ */
 @page{size:A4 portrait;margin:0}
 
@@ -2915,7 +2996,7 @@ function downloadHtml(){
   <div class="header-right"><div class="briefing-label">FX CASCADE · TRADER</div><div class="briefing-sub">{{date_hdr}}</div></div>
 </div>
 <div class="page-subbar">
-  <span>{{date_hdr}}</span><span>GMT+1</span>
+  <span>{{date_hdr}}</span>
   <span style="background:rgba(27,69,180,.12);color:var(--royal);padding:2px 10px;border-radius:20px;font-weight:700;border:1px solid var(--royal-dim)">{{n_setups}} setup(s)</span>
   <span>Universe <strong>{{n_passed}}/{{n_total}}</strong></span>
   <span>Event Risk : <strong style="color:{% if event_risk == 'High' %}var(--red){% elif event_risk == 'Medium' %}#EA580C{% else %}var(--green){% endif %}">{{event_risk}}</strong></span>
@@ -2930,6 +3011,7 @@ function downloadHtml(){
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
   {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
+  {% if cal_feed_truncated %}<div class="banner">COUVERTURE CALENDRIER TRONQUÉE — {{cal_feed_detail}}. La fenêtre WATCH (168h), le flag C7 (cohérence d'horizon) et le régime portefeuille peuvent surestimer l'absence de risque événementiel au-delà de cette limite.</div>{% endif %}
   {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
   <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
@@ -3043,7 +3125,9 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   macro_regime: MacroRegime = MacroRegime.UNKNOWN,
                   cal_time_degraded: bool = False,
                   cal_time_offset: float = 0.0,
-                  cal_time_detail: str = "") -> str:
+                  cal_time_detail: str = "",
+                  cal_feed_truncated: bool = False,
+                  cal_feed_detail: str = "") -> str:
     risk = "Low"
     if calendar:
         if calendar.blackout:
@@ -3053,9 +3137,27 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     theme_str = ", ".join(f"{k} {v}" for k, v in (themes.strong.items() if themes else []))
     # Évaluation granulaire de la qualité SR (pas binaire)
     sr_entry_zone = sum(1 for s in setups if s.entry_type == "Limit")
-    sr_tp1_zone = sum(1 for s in setups if not s.rr_synthetic)
+    # PATCH-SRBADGE (round du 31/07/2026, audit F-10/C-07) : l'ancien test
+    # `not s.rr_synthetic` exigeait TP1 ET TP2 réels — un TP2 ancré sur une
+    # zone SR réelle avec TP1 synthétique (cas fréquent et documenté : zone
+    # opposée lointaine réservée à TP2, cf. compute_tp1/compute_tp2)
+    # affichait à tort "SR indisponible · mode ATR". Nouveau test : au moins
+    # UN niveau (entrée, TP1 ou TP2) ancré sur une zone réelle suffit à lever
+    # le badge.
+    sr_tp_zone = sum(
+        1 for s in setups
+        if (s.tp1_synthetic is False)
+        or (s.tp2 is not None and s.tp2_synthetic is False)
+    )
+    # Objets ancien schéma (tp1_synthetic=None, ex. SetupV4 désérialisé d'un
+    # run antérieur au patch) : logique legacy STRICTEMENT inchangée.
+    sr_tp_zone_legacy = sum(
+        1 for s in setups
+        if s.tp1_synthetic is None and not s.rr_synthetic
+    )
     # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
-    sr_degraded = (sr_entry_zone == 0 and sr_tp1_zone == 0) if setups else False
+    sr_degraded = (sr_entry_zone == 0 and sr_tp_zone == 0
+                   and sr_tp_zone_legacy == 0) if setups else False
     date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
     # PATCH-CORRGROUPS : sérialisé une seule fois ici, jamais dans le
     # template — cf. principe "le HTML n'est jamais une source de vérité
@@ -3075,6 +3177,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_time_degraded=cal_time_degraded,
         cal_time_offset=cal_time_offset,
         cal_time_detail=cal_time_detail,
+        cal_feed_truncated=cal_feed_truncated,
+        cal_feed_detail=cal_feed_detail,
     )
 
 
