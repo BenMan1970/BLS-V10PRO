@@ -346,6 +346,9 @@ class CalendarSets(BaseModel):
     watch_ccy: set[str] = Field(default_factory=set)
     time_degraded: bool = False
     time_offset_hours: float = 0.0
+    # V4-09 FIX : le flag feed_horizon_truncated doit atteindre f7_macro
+    # pour déclencher le fail-closed sur un flux tronqué ou vide.
+    feed_horizon_truncated: bool = False
 
     @model_validator(mode="after")
     def _sets(self) -> "CalendarSets":
@@ -364,15 +367,9 @@ class CalendarData(BaseModel):
     time_degraded: bool = False
     time_offset_hours: float = 0.0
     time_audit_detail: str = ""
-    # PATCH-FEEDHORIZON (round du 31/07/2026, audit F-15) : le flux FF est
-    # HEBDOMADAIRE (ff_calendar_thisweek.json). Un vendredi, l'horizon
-    # prospectif résiduel tombe sous WATCH_MAX_H et le silence calendaire
-    # au-delà n'est PAS une absence de risque — il est indistinguable d'une
-    # absence de données. Détecté et publié, jamais masqué. L'endpoint
-    # multi-semaines n'existe pas chez cet hébergeur (404 vérifié le
-    # 31/07/2026), la visibilité est donc le seul correctif zero-régression
-    # disponible sans changer de fournisseur de données.
+    reachable: bool = True  # V4-09 FIX: le flux peut être injoignable
     feed_horizon_truncated: bool = False
+    feed_horizon_h: Optional[float] = None  # V4-09 FIX: exposé dans le template
     feed_coverage_detail: str = ""
 
     def bucket(self, now: datetime) -> CalendarSets:
@@ -403,7 +400,8 @@ class CalendarData(BaseModel):
                 watch.append(ev)
         return CalendarSets(blackout=blackout, proximity=proximity, watch=watch,
                             time_degraded=self.time_degraded,
-                            time_offset_hours=self.time_offset_hours)
+                            time_offset_hours=self.time_offset_hours,
+                            feed_horizon_truncated=self.feed_horizon_truncated)
 
 
 def audit_calendar_time_consistency(
@@ -502,6 +500,9 @@ class CanonicalAsset(BaseModel):
     quote: Optional[str] = None
     asset_class: str = "forex"
     current_price: Optional[float] = None
+    # V4-01 FIX : le champ current_price_source était silencieusement ignoré
+    # (extra="ignore"). Déclaration explicite pour retenir la source (stale, live, etc.)
+    current_price_source: Optional[str] = None  # V4: "stale", "live", etc.
     rsi_by_tf: dict[str, dict] = Field(default_factory=dict)
     rsi_h4_status: Optional[str] = None
     mtf: Optional[MTFView] = None
@@ -513,6 +514,7 @@ class CanonicalAsset(BaseModel):
     nearest_aligned_zone: Optional[ZoneView] = None
     hot_zone_primary: Optional[ZoneView] = None
     conviction_cap: Optional[str] = None  # V4: mapped from JSON (e.g. "BBB" for synthetic ATR)
+    c7_flag: Optional[str] = None  # V4-08: délai event S/A (HH:MM approximatif)
     # v3.5.0: produced by merge engine, read-only here.
     # None when market_context absent or merge engine crashed on this asset.
     market_context: Optional[dict[str, Any]] = None
@@ -1267,33 +1269,11 @@ def _surprise_factor(ev: CalendarEvent) -> float:
 
 def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
-    if cal is None:
-        # PATCH-CALFAILOPEN-F5 (round de validation zero-régression, 31/07/2026) :
-        # ANCIEN comportement : score=1.0 ("risque nul") + is_missing=False.
-        # Une panne du feed calendrier (fetch_raw() retourne [] sur toute
-        # erreur HTTP, cf. calendar_layer.fetch_raw) faisait donc BAISSER
-        # macro_risk = 1.0 - f7_macro (apply_caps, "High macro risk -> AA")
-        # et levait silencieusement tous les caps AA liés au calendrier --
-        # l'inverse exact de la doctrine fail-closed que ce même fichier
-        # revendique explicitement ailleurs (CalendarData.bucket, plus haut :
-        # "Fail-closed délibéré"). Confirmé par l'audit (F5) : contradiction
-        # interne démontrée entre deux endroits du même module.
-        #
-        # NOUVEAU : traité comme un blackout potentiel NON écarté -- même
-        # score (0.0) que la branche "BLACKOUT actif" ci-dessous -- ET
-        # is_missing=True afin que (a) le template HTML affiche déjà
-        # l'indicateur "miss" existant (voir F7 MAC dans le rendu) au lieu
-        # de masquer la dégradation au lecteur, (b) le traitement soit
-        # cohérent avec la sémantique "facteur manquant" utilisée ailleurs.
-        # NB : is_missing=True fait aussi sortir f7_macro de absolute_mean
-        # (propriété FactorVector.absolute_mean) -- comportement partagé
-        # avec tous les autres facteurs manquants (cf. audit F7, non
-        # corrigé ici : changer cette exclusion affecterait les 7 facteurs
-        # pour tous les actifs, pas seulement le cas calendrier-absent, et
-        # exige le rejeu historique ≥60 jours recommandé en V-2/V-3 avant
-        # toute modification -- hors périmètre "chirurgical" de ce correctif).
+    # V4-09 FIX : cal peut être None (absent) OU have feed_horizon_truncated=True
+    # Dans les deux cas, FAIL-CLOSED: risque NON écarté (score 0.0).
+    if cal is None or cal.feed_horizon_truncated:
         return ScoredFactor("f7_macro", None, 0.0, True,
-                            "calendrier absent — fail-closed (risque NON écarté, "
+                            "calendrier absent ou tronqué — fail-closed (risque NON écarté, "
                             "pas risque nul)")
     sides = {a.base, (a.quote or "")}
     # Blackout active -> score 0 (hard veto handled in preflight)
@@ -1599,6 +1579,41 @@ def _c9_freshness_mismatch(a: CanonicalAsset, now: Optional[datetime],
     return None
 
 
+def _c11_stale_price_market_entry(a: CanonicalAsset, entry_type: str) -> Optional[Flag]:
+    """V4-01 FIX (round de validation zero-régression, 02/08/2026, gate G5).
+
+    Le champ ``current_price_source`` a été déclaré explicitement sur
+    ``CanonicalAsset`` par le correctif V4-01 (ci-dessus) pour cesser d'être
+    silencieusement supprimé par ``extra="ignore"`` -- mais aucune fonction
+    ne le consultait ensuite : l'audit indépendant relevait que ce correctif
+    "retient la donnée mais ne la qualifie ni ne la rend" (rapport RUN-4,
+    §7 V4-01, gate G5 : "gate ou qualification explicite si `stale` sur un
+    setup publié").
+
+    Cette fonction ferme cette lacune par le mécanisme déjà éprouvé des
+    flags C1-C10 : quand l'entrée calculée est de type "Market" (le seul cas
+    où `compute_entry` utilise `a.current_price` TEL QUEL comme niveau
+    d'entrée -- une entrée "Limit" utilise un niveau de zone S/R, donc n'est
+    pas concernée) ET que la couche de fusion amont a explicitement marqué
+    ce prix comme périmé, un flag "major" est émis. Sévérité alignée sur les
+    autres flags d'intégrité de donnée réels (C3, C6) qui pèsent déjà sur
+    `k` dans `grade()` : un prix officiellement périmé utilisé tel quel
+    comme niveau d'entrée est un défaut d'intégrité de donnée, pas un simple
+    avertissement cosmétique.
+
+    Zéro régression : aucun flag n'est émis pour un actif dont
+    `current_price_source` est absent, "live", ou toute valeur autre que
+    "stale" (comportement inchangé), ni pour une entrée "Limit" (jamais
+    concernée par ce prédicat)."""
+    if entry_type != "Market":
+        return None
+    if (a.current_price_source or "").lower() != "stale":
+        return None
+    return Flag("C11", "major",
+                "Entrée Market construite sur un prix marqué périmé "
+                "(current_price_source=stale) par la couche de fusion en amont")
+
+
 def _c10_htf_divergence(a: CanonicalAsset, cfg: V4Config = CONFIG) -> Optional[Flag]:
     """Divergence RSI confirmée, CONTRAIRE au trade, sur TF senior (W1/D1).
 
@@ -1662,8 +1677,13 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
     """Returns the most restrictive cap and a human reason, or (None, None)."""
     caps: list[tuple[Conviction, str]] = []
     # Synthetic ATR -> BBB (from JSON conviction_cap or atr_source)
-    if (a.conviction_cap or "").upper() == "BBB" or (a.atr_source or "").lower() == "synthetic":
-        caps.append((Conviction.BBB, "ATR synthétique"))
+    # V4-02 FIX : distinguer les deux causes distinctes qui génèrent BBB
+    # 1. conviction_cap = "BBB" sur 33 actifs (configuration) — message vrai sur 32/33
+    # 2. atr_source = "synthetic" sur 1 actif (DE30/EUR) — message vrai sur 1/33
+    if (a.conviction_cap or "").upper() == "BBB":
+        caps.append((Conviction.BBB, "conviction_cap=BBB"))
+    if (a.atr_source or "").lower() == "synthetic":
+        caps.append((Conviction.BBB, "ATR source synthétique"))
     # High macro risk -> AA  (risk = 1 - f7_score)
     macro_risk = 1.0 - fv.get("f7_macro")
     if macro_risk >= cfg.MACRO_CAP_RISK_THRESHOLD:
@@ -1693,32 +1713,49 @@ def grade(absolute_mean: float, flags: list[Flag], cap: Optional[Conviction],
           cfg: V4Config = CONFIG) -> Conviction:
     """Map absolute score x contradictions to AAA..B. Caps applied last.
 
-    NOTE — cap_is_restrictive_floor : un cap ne doit servir de « laissez-passer »
-    vers le palier BBB que s'il est lui-même AU PLUS restrictif que BBB (BBB/BB/B).
-    Un cap moins restrictif que BBB (ex. AA — risque macro, ou P1-C régime
-    pré-policy) ne doit JAMAIS faire remonter un score faible : son seul rôle
-    est de plafonner via le min() final ci-dessous, jamais de plancher.
-    Sans cette garde, un cap AA appliqué à TOUT le portefeuille (cas P1-C,
-    portefeuille entier en régime PRE_POLICY_COMPRESSION) ferait entrer
-    n'importe quel setup faible dans le palier BBB via l'ancien `cap is not
-    None`, alors que AA (ordinal 5) > BBB (ordinal 3) ne peut ensuite jamais
-    redescendre la base au test `cap < base` — un plafond devenu plancher.
-    """
+    V4-02 FIX (round de validation zero-régression, 02/08/2026, gate G3,
+    CRITIQUE). L'ancienne garde `cap_is_restrictive_floor` avait pour
+    intention documentée de protéger contre un cap NON restrictif (ex. AA
+    du régime P1-C, portefeuille entier) agissant comme un laissez-passer
+    vers BBB. Mais son implémentation produisait l'effet strictement
+    inverse pour tout cap RÉELLEMENT restrictif (BBB, le cas de
+    `conviction_cap` présent sur la quasi-totalité de l'univers desk ce
+    cycle) : `(m >= BBB_MIN or cap_is_restrictive_floor) and k <= 2`
+    forçait `base = BBB` dès que `k <= 2`, quelle que soit la faiblesse de
+    `m` — un plafond de conviction agissant comme PLANCHER, précisément le
+    défaut que la garde prétendait corriger, mais pour le cap le plus
+    fréquent du système plutôt que pour le cas rare qu'elle ciblait.
+    Conséquence matérielle démontrée par l'audit indépendant (rapport
+    RUN-4, V4-02) : un score décayé strictement sous le seuil BB, combiné à
+    `conviction_cap=BBB` et k<=2, ressortait en BBB (donc publié en WATCH
+    par le Comité) au lieu de B/BB (donc rejeté en LOW_CONVICTION).
+
+    Correction : `base` est dérivé UNIQUEMENT de `absolute_mean` et `k`,
+    sans jamais consulter `cap` pour le faire remonter. Le rôle de `cap`
+    reste exactement celui déjà correctement implémenté juste après cette
+    dérivation : un plafond qui ne peut que faire DESCENDRE `base` (`if cap
+    plus restrictif que base: base = cap`), jamais le faire monter — c'est
+    la seule interprétation cohérente avec le nom même du mécanisme
+    ("cap" = plafond) et avec le NOTE d'origine ("un cap ne doit jamais
+    servir de laissez-passer").
+
+    Zéro régression : pour tout setup où `cap is None`, ou où `m`/`k`
+    atteignent déjà naturellement le palier BBB sans l'aide du cap, le
+    résultat est strictement identique à avant ce correctif. Seuls les
+    setups qui étaient artificiellement promus en BBB par un cap restrictif
+    malgré un `m` insuffisant redescendent désormais à BB/B, comme
+    l'exigeait le gate G3."""
     minors = sum(1 for f in flags if f.severity == "minor")
     majors = sum(1 for f in flags if f.severity == "major")
     k = minors + 2 * majors
     m = absolute_mean
-    cap_is_restrictive_floor = (
-        cap is not None
-        and _CONVICTION_ORDINAL[cap.value] <= _CONVICTION_ORDINAL[Conviction.BBB.value]
-    )
     if m >= cfg.AAA_MIN and k == 0:
         base = Conviction.AAA
     elif m >= cfg.AA_MIN and k <= 1:
         base = Conviction.AA
     elif m >= cfg.A_MIN and k <= 1:
         base = Conviction.A
-    elif (m >= cfg.BBB_MIN or cap_is_restrictive_floor) and k <= 2:
+    elif m >= cfg.BBB_MIN and k <= 2:
         base = Conviction.BBB
     elif m >= cfg.BB_MIN:
         base = Conviction.BB
@@ -2431,6 +2468,13 @@ def _pipeline_factors_and_grades(
         flags = detect_contradictions(a, fv, themes, cal_sets, config,
                                       now=clock.now_utc,
                                       horizon=(s.horizon_days, s.horizon_event_days, s.horizon_event))
+        # V4-01/G5 FIX : câblé ici plutôt que dans detect_contradictions() car
+        # ce prédicat a besoin de s.entry_type (connu depuis _make_draft, pas
+        # encore disponible au point d'appel de detect_contradictions). Simple
+        # append : n'altère aucune des logiques C1-C10 existantes.
+        stale_flag = _c11_stale_price_market_entry(a, s.entry_type)
+        if stale_flag is not None:
+            flags.append(stale_flag)
         s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
         cap, cap_reason = apply_caps(a, fv, config, flags=flags, regime=regime)
         if cap_reason:
@@ -2483,7 +2527,7 @@ def run_pipeline(
     if calendar_path and not calendar_json_path:
         raise NotImplementedError(
             "HTML calendar parsing is delegated upstream; pass --calendar-json.")
-    calendar_data = load_calendar(calendar_json_path)
+    calendar_data = load_calendar(calendar_json_path, desk_generated_at=meta.generated_at)
     clock = Clock.from_meta(meta.generated_at)
 
     # Auto-nommage si pas de chemin explicite
@@ -2525,7 +2569,8 @@ def run_pipeline(
                          cal_time_offset=calendar_data.time_offset_hours,
                          cal_time_detail=calendar_data.time_audit_detail,
                          cal_feed_truncated=calendar_data.feed_horizon_truncated,
-                         cal_feed_detail=calendar_data.feed_coverage_detail)
+                         cal_feed_detail=calendar_data.feed_coverage_detail,
+                         version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
@@ -2604,14 +2649,35 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     return meta, assets, correlation_groups
 
 
-def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
+def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional[datetime] = None) -> CalendarData:
     """Charge calendar.json produit par le Module 04 (wrapper BLUESTAR) ou par
     CalendarData natif. Supporte les deux formats sans régression.
 
     Priorité de lecture des events :
       1. ``events_engine``  — champ dédié ENGINE (passés 72h + futurs, R4/R5)
       2. ``events``         — champ UI filtré (fallback compatible ancien format)
-    """
+
+    `desk_generated_at` (V4-08 FIX, round de validation zero-régression,
+    02/08/2026, MAJEUR) : horodatage de génération DU DESK (`merge.json` ::
+    `meta.generated_at`), indépendant du flux calendaire. Nécessaire pour
+    que `audit_calendar_time_consistency` compare deux horloges réellement
+    distinctes.
+
+    Avant ce correctif, l'audit comparait `hours_until` (calculé par
+    `calendar_layer.enrich` avec `event_time_ref = metadata.generated_at_utc`
+    du flux calendaire lui-même) à `(datetime_utc − gen_at)` où `gen_at`
+    était lu... du même `metadata.generated_at_utc`. Les deux termes de la
+    soustraction dérivaient donc de LA MÊME horloge : l'écart mesuré était
+    borné par le seul bruit d'arrondi (`round(h, 2) − h`, ≤ 0,005h), 50 fois
+    sous `CAL_TIME_TOL_H = 0,25h` — un contrôle tautologique, incapable de
+    se déclencher (audit indépendant, rapport RUN-4, V4-08).
+
+    `desk_generated_at=None` (défaut) préserve exactement l'ancien
+    comportement pour tout appelant qui ne le fournit pas (ex. tests
+    existants) — zéro régression. `run_pipeline` le fournit désormais
+    (`meta.generated_at`, disponible dans son scope avant l'appel à
+    `load_calendar`), rendant le contrôle enfin capable de détecter un
+    réel décalage entre l'horloge du flux calendaire et celle du Desk."""
     if not calendar_json_path:
         return CalendarData()
     with open(calendar_json_path, encoding="utf-8") as f:
@@ -2654,7 +2720,12 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
                 logger.debug("calendar event skipped: %s", exc)
 
         gen_at = _parse_iso_utc(meta.get("generated_at_utc"))
-        off, conc, tot = audit_calendar_time_consistency(events_raw, gen_at)
+        # V4-08 FIX : référence indépendante pour l'audit de cohérence
+        # (desk_generated_at si fourni), gen_at (calendrier) sinon — le
+        # `or` ne dégrade jamais un appel qui ne fournit pas
+        # desk_generated_at, il retombe sur l'ancien comportement.
+        _consistency_ref = desk_generated_at or gen_at
+        off, conc, tot = audit_calendar_time_consistency(events_raw, _consistency_ref)
         if tot and (conc / tot) >= CAL_TIME_MIN_RATIO and abs(off) > CAL_TIME_TOL_H:
             time_degraded = True
             time_offset = off
@@ -2668,7 +2739,12 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
         data = CalendarData(events=cal_events,
                             time_degraded=time_degraded,
                             time_offset_hours=time_offset,
-                            time_audit_detail=time_detail)
+                            time_audit_detail=time_detail,
+                            # V4-09 FIX : propager le flag de troncature depuis le wrapper
+                            reachable=bool(meta.get("reachable", True) if is_wrapper else True),
+                            feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False) if is_wrapper else False),
+                            feed_horizon_h=meta.get("feed_horizon_h") if is_wrapper else None,
+                            feed_horizon_detail=meta.get("feed_coverage_detail", "") if is_wrapper else "")
     else:
         # Format CalendarData natif : validation directe (comportement original)
         data = CalendarData.model_validate_json(raw)
@@ -2677,6 +2753,12 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
     # Horizon réel du flux comparé à la fenêtre WATCH. Aucune décision n'est
     # modifiée ici : on rend visible une limite de couverture qui était
     # jusqu'ici silencieuse et indistinguable d'une absence de risque.
+    # V4-09 FIX : détecter aussi les flux vides/non-reachables → fail-closed
+    should_have_events = data.events or (not is_wrapper and meta.get("events")) or not is_wrapper
+    is_truncated_or_unreachable = (
+        (is_wrapper and (not meta.get("reachable", True) or meta.get("feed_horizon_truncated", False)))
+        or (not data.events and is_wrapper)
+    )
     if data.events:
         _ref = gen_at if (is_wrapper and gen_at is not None) else data.parsed_at
         # Défensif : parsed_at n'a pas de validateur de fuseau et un
@@ -2690,10 +2772,25 @@ def load_calendar(calendar_json_path: Optional[str]) -> CalendarData:
             data.feed_horizon_truncated = True
             data.feed_coverage_detail = (
                 f"dernier événement du flux {_feed_end:%Y-%m-%d %H:%M UTC} "
-                f"= +{_horizon_h:.0f}h < fenêtre WATCH {WATCH_MAX_H:.0f}h — "
+                # R-12 FIX (round de validation zero-régression, 02/08/2026) :
+                # l'ancien littéral "= +{_horizon_h:.0f}h" produisait "+-28h"
+                # quand _horizon_h est négatif (flux déjà terminé dans le
+                # passé relativement à _ref) — un signe "+" concaténé devant
+                # un nombre déjà négatif, jamais corrigé (audit R-12). Le
+                # flag de format `{:+.0f}` affiche le bon signe dans les
+                # deux cas (+5h, -28h), sans jamais les dupliquer.
+                f"= {_horizon_h:+.0f}h < fenêtre WATCH {WATCH_MAX_H:.0f}h — "
                 f"le silence calendaire au-delà n'est PAS une absence de risque"
             )
             logger.warning("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
+    elif is_wrapper:
+        # V4-09 FIX : flux vide ou non-reachable → broadcast fail-closed
+        data.feed_horizon_truncated = True
+        data.feed_coverage_detail = (
+            f"flux calendaire vide ou non accessible — risque NON écarté, "
+            f"pas risque nul (attender une fenêtre complète ou vérifier la source)"
+        )
+        logger.warning("FEED-TRONCU OU VIDE : %s", data.feed_coverage_detail)
 
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
@@ -2991,7 +3088,7 @@ function downloadHtml(){
 <div class="page-header">
   <div class="header-left">
     <div class="logo-marker"><svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
-    <div><div class="sys-label">BLUESTAR SYSTEM</div><div class="sys-name">BLUESTAR</div><div class="sys-desc">FX INSTITUTIONAL DESK · v10 HYBRID V4</div></div>
+    <div><div class="sys-label">BLUESTAR SYSTEM</div><div class="sys-name">BLUESTAR</div><div class="sys-desc">FX INSTITUTIONAL DESK · {{version}}</div></div>
   </div>
   <div class="header-right"><div class="briefing-label">FX CASCADE · TRADER</div><div class="briefing-sub">{{date_hdr}}</div></div>
 </div>
@@ -3102,7 +3199,7 @@ function downloadHtml(){
 </div>
 
 </div>
-<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM v10 HYBRID V4 · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
+<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
 <script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
 </div>
 </body></html>"""
@@ -3127,7 +3224,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_time_offset: float = 0.0,
                   cal_time_detail: str = "",
                   cal_feed_truncated: bool = False,
-                  cal_feed_detail: str = "") -> str:
+                  cal_feed_detail: str = "",
+                  version: str = __version__) -> str:
     risk = "Low"
     if calendar:
         if calendar.blackout:
