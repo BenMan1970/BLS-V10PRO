@@ -309,6 +309,13 @@ CAL_TIME_MIN_RATIO = 0.80     # part d'événements concordants requise
 CALENDAR_STALE_TOL_H = 0.25   # patch comité 03/08/2026, pt.2 : CACHE_TTL (5 min)
                                # + tolérance d'ordonnancement. Seuil métier,
                                # ajustable — indépendant de CAL_TIME_TOL_H.
+                               # calendrier ANTÉRIEUR au Desk
+MERGE_STALE_TOL_H = 0.25      # merge ANTÉRIEUR au calendrier (patch 04/08/2026)
+
+# Devises réellement traitées par le desk. Sert à distinguer une jambe-devise
+# d'une jambe-instrument (US30, NAS100, SPX500, DE30, XAU) lors du contrôle de
+# couverture du flux calendaire — un indice n'a pas de calendrier propre.
+_DESK_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"})
 
 
 class CalendarEvent(BaseModel):
@@ -357,6 +364,7 @@ class CalendarSets(BaseModel):
     # V4-09 FIX : le flag feed_horizon_truncated doit atteindre f7_macro
     # pour déclencher le fail-closed sur un flux tronqué ou vide.
     feed_horizon_truncated: bool = False
+    covered_currencies: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sets(self) -> "CalendarSets":
@@ -383,9 +391,15 @@ class CalendarData(BaseModel):
     # de fuseau (CALENDAR_STALE). Ne passe jamais par hours_until ; compare
     # l'horloge du Desk (merge.meta.generated_at) à celle du flux calendaire
     # (metadata.generated_at_utc). Bannière distincte de P0-A.
-    stale: bool = False
+    # Fraîcheur — DEUX conditions OPPOSÉES, jamais agrégées par abs().
+    stale: bool = False              # CALENDAR_STALE : calendrier antérieur au Desk
     stale_age_h: float = 0.0
     stale_detail: str = ""
+    merge_stale: bool = False        # MERGE_STALE : snapshot marché antérieur au calendrier
+    merge_stale_age_h: float = 0.0
+    merge_stale_detail: str = ""
+    # metadata.filters_applied.currencies — lu, plus ignoré
+    covered_currencies: list[str] = Field(default_factory=list)
 
     def bucket(self, now: datetime) -> CalendarSets:
         """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
@@ -416,7 +430,8 @@ class CalendarData(BaseModel):
         return CalendarSets(blackout=blackout, proximity=proximity, watch=watch,
                             time_degraded=self.time_degraded,
                             time_offset_hours=self.time_offset_hours,
-                            feed_horizon_truncated=self.feed_horizon_truncated)
+                            feed_horizon_truncated=self.feed_horizon_truncated,
+                            covered_currencies=list(self.covered_currencies))
 
 
 def audit_calendar_time_consistency(
@@ -814,6 +829,17 @@ class V4Config:
     BBB_MIN: float = 0.42
     BB_MIN: float = 0.30
     MACRO_CAP_RISK_THRESHOLD: float = 0.50   # macro RISK >= 0.5 -> cap AA
+    # [OPT-IN — DÉFAUT = COMPORTEMENT ACTUEL, BIT POUR BIT]
+    # False : un flux tronqué neutralise f7 pour TOUS les actifs. Constat
+    #         d'audit : le flag est structurellement toujours vrai sur un flux
+    #         hebdomadaire, donc f7 est mort et le cap AA universel.
+    # True  : f7 reste MESURÉ pour un actif dont le prochain event S/A tombe
+    #         DANS la fenêtre couverte ; fail-closed conservé uniquement quand
+    #         le silence est invérifiable (aucun event couvert, ou devise hors
+    #         filtre producteur).
+    # MODIFIE LES CONVICTIONS ET LA SÉLECTION. Exige un A/B sur >= 20 sessions
+    # archivées avant activation en production. Ne pas activer avec ce patch.
+    MACRO_COVERAGE_GRANULAR: bool = False
     # alpha decay (age_d1 -> score penalty)
     # FIX-NAMING : la formule est exp(-age/tau), donc ce paramètre est un tau
     # (constante de temps), PAS une demi-vie.
@@ -1286,7 +1312,7 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
     # V4-09 FIX : cal peut être None (absent) OU have feed_horizon_truncated=True
     # Dans les deux cas, FAIL-CLOSED: risque NON écarté (score 0.0).
-    if cal is None or cal.feed_horizon_truncated:
+    if cal is None or (not cfg.MACRO_COVERAGE_GRANULAR and cal.feed_horizon_truncated):
         return ScoredFactor("f7_macro", None, 0.0, True,
                             "calendrier absent ou tronqué — fail-closed (risque NON écarté, "
                             "pas risque nul)")
@@ -1309,6 +1335,19 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
             relevant_h.append(delta)
 
     if not relevant_h:
+        if cfg.MACRO_COVERAGE_GRANULAR:
+            cov = set(cal.covered_currencies or ())
+            uncovered = sorted(c for c in sides
+                               if cov and c in _DESK_CURRENCIES and c not in cov)
+            if uncovered:
+                return ScoredFactor("f7_macro", None, 0.0, True,
+                                    f"devise(s) hors couverture du flux "
+                                    f"({', '.join(uncovered)}) — fail-closed "
+                                    f"(silence invérifiable)")
+            if cal.feed_horizon_truncated:
+                return ScoredFactor("f7_macro", None, 0.0, True,
+                                    "aucun event S/A dans la fenêtre couverte mais flux "
+                                    "tronqué — fail-closed (silence invérifiable)")
         base_score = 1.0
         base_detail = "aucun event S/A futur"
         base_risk = 0.0
@@ -1702,7 +1741,12 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
     # High macro risk -> AA  (risk = 1 - f7_score)
     macro_risk = 1.0 - fv.get("f7_macro")
     if macro_risk >= cfg.MACRO_CAP_RISK_THRESHOLD:
-        caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
+        if "f7_macro" in fv.missing:
+            caps.append((Conviction.AA,
+                         "risque macro NON ÉVALUÉ (couverture calendaire "
+                         "insuffisante) — cap prudentiel"))
+        else:
+            caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
     # v3.5.0 Phase 2: structural_risk Critical -> BBB cap.
     # REVERSAL_RISK state requires 3 concurrent factors (D1 counter + HTF div + mature
     # OR full escalation OR W1+ counter). Capping at BBB signals structural uncertainty
@@ -2590,6 +2634,9 @@ def run_pipeline(
                          cal_feed_detail=calendar_data.feed_coverage_detail,
                          cal_stale=calendar_data.stale,
                          cal_stale_detail=calendar_data.stale_detail,
+                         cal_merge_stale=calendar_data.merge_stale,
+                         cal_merge_stale_detail=calendar_data.merge_stale_detail,
+                         cal_covered_currencies=calendar_data.covered_currencies,
                          version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -2790,16 +2837,15 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
         # affichage seul ("données au ..."). Le seuil CALENDAR_STALE_TOL_H
         # est une décision métier (cf. CACHE_TTL du producteur), pas un
         # invariant de fuseau.
+        # Patch 04/08/2026 — deux conditions opposées, jamais confondues.
+        # L'ancien `abs(age_h) > TOL` étiquetait « CALENDRIER PÉRIMÉ » le cas où
+        # le calendrier est au contraire PLUS RÉCENT que le merge : c'est alors
+        # le snapshot de marché qui est périmé. Accuser le mauvais fichier est
+        # un défaut de véracité d'affichage, pas une nuance de formulation.
         stale, stale_age_h, stale_detail = False, 0.0, ""
+        merge_stale, merge_stale_age_h, merge_stale_detail = False, 0.0, ""
         if desk_generated_at and gen_at:
             age_h = (desk_generated_at - gen_at).total_seconds() / 3600.0
-            # FIX 04/08/2026 : `abs(age_h) > TOL` agrégeait deux cas opposés
-            # sous une seule étiquette « CALENDRIER PÉRIMÉ » — age_h > 0 (Desk
-            # postérieur au flux : le calendrier est bien le fichier périmé)
-            # et age_h < 0 (Desk antérieur au flux : c'est le snapshot Desk
-            # qui est périmé, pas le calendrier). Le second cas affichait en
-            # plus `{age_h:+.2f}` négatif à l'écran sans jamais nommer le bon
-            # coupable. Les deux branches sont maintenant distinguées.
             if age_h > CALENDAR_STALE_TOL_H:
                 stale = True
                 stale_age_h = age_h
@@ -2809,16 +2855,22 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                     f"— données calendaires potentiellement périmées"
                 )
                 logger.warning("CALENDAR_STALE : %s", stale_detail)
-            elif age_h < -CALENDAR_STALE_TOL_H:
-                stale = True
-                stale_age_h = -age_h
-                stale_detail = (
-                    f"snapshot Desk antérieur au calendrier de {-age_h:.2f}h "
-                    f"(Desk: {desk_generated_at:%H:%M:%S} UTC, flux: {gen_at:%H:%M:%S} UTC) "
-                    f"— données de marché (prix/ATR/RSI) potentiellement périmées, "
-                    f"calendrier plus récent"
+            elif age_h < -MERGE_STALE_TOL_H:
+                merge_stale = True
+                merge_stale_age_h = -age_h
+                merge_stale_detail = (
+                    f"snapshot de marché antérieur au calendrier de {-age_h:.2f}h "
+                    f"({-age_h * 60:.0f} min) — merge : {desk_generated_at:%H:%M:%S} UTC, "
+                    f"calendrier : {gen_at:%H:%M:%S} UTC. Prix, ATR, RSI et horloge de "
+                    f"scoring sont ceux du merge ; le calendrier est plus récent. "
+                    f"Aucune fenêtre de blackout modifiée."
                 )
-                logger.warning("MERGE_STALE : %s", stale_detail)
+                logger.warning("MERGE_STALE : %s", merge_stale_detail)
+
+        _filters = meta.get("filters_applied") or {}
+        _cov_raw = _filters.get("currencies") if isinstance(_filters, dict) else None
+        covered = (sorted({str(c).upper() for c in _cov_raw})
+                   if isinstance(_cov_raw, list) else [])
 
         data = CalendarData(events=cal_events,
                             time_degraded=time_degraded,
@@ -2827,6 +2879,10 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                             stale=stale,
                             stale_age_h=stale_age_h,
                             stale_detail=stale_detail,
+                            merge_stale=merge_stale,
+                            merge_stale_age_h=merge_stale_age_h,
+                            merge_stale_detail=merge_stale_detail,
+                            covered_currencies=covered,
                             # V4-09 FIX : propager le flag de troncature depuis le wrapper
                             reachable=bool(meta.get("reachable", True) if is_wrapper else True),
                             feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False) if is_wrapper else False),
@@ -2856,7 +2912,7 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
         if _horizon_h < WATCH_MAX_H:
             data.feed_horizon_truncated = True
             data.feed_coverage_detail = (
-                f"dernier événement du flux {_feed_end:%Y-%m-%d %H:%M UTC} "
+                f"couverture du flux : {_ref:%d/%m %H:%M} → {_feed_end:%d/%m %H:%M} UTC "
                 # R-12 FIX (round de validation zero-régression, 02/08/2026) :
                 # l'ancien littéral "= +{_horizon_h:.0f}h" produisait "+-28h"
                 # quand _horizon_h est négatif (flux déjà terminé dans le
@@ -2864,8 +2920,11 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 # un nombre déjà négatif, jamais corrigé (audit R-12). Le
                 # flag de format `{:+.0f}` affiche le bon signe dans les
                 # deux cas (+5h, -28h), sans jamais les dupliquer.
-                f"= {_horizon_h:+.0f}h < fenêtre WATCH {WATCH_MAX_H:.0f}h — "
-                f"le silence calendaire au-delà n'est PAS une absence de risque"
+                f"({_horizon_h:+.0f}h) < fenêtre WATCH {WATCH_MAX_H:.0f}h — attendu "
+                f"pour un flux hebdomadaire. Au-delà du {_feed_end:%d/%m %H:%M} UTC, "
+                f"l'absence d'événement au calendrier n'est PAS une absence de "
+                f"risque : F7 MACRO reste en fail-closed et le cap prudentiel "
+                f"s'applique"
             )
             logger.warning("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
     elif is_wrapper:
@@ -2943,6 +3002,8 @@ body{background:var(--bg);color:var(--body);font-family:var(--sans);font-size:12
 .sec-sub{margin-left:auto;font-size:9.5px;color:var(--muted);font-style:italic}
 .sec-body{padding:12px 16px}
 .banner{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx);border-radius:var(--r);padding:9px 14px;margin-bottom:12px;font-family:var(--mono);font-size:10.5px;font-weight:600}
+.banner.warn{background:#fff7e6;border-color:#f0c98a;color:#7a4a00}
+.banner.info{background:var(--royal-light);border-color:var(--royal-dim);color:var(--sec);font-weight:500}
 .setup{border:1px solid var(--border);border-radius:var(--rl);overflow:hidden;margin-bottom:11px;box-shadow:0 1px 2px rgba(13,31,78,.03)}
 .setup:last-child{margin-bottom:0}
 .setup.aaa{border-left:3px solid var(--royal)}.setup.aa{border-left:3px solid var(--royal-mid)}.setup.a{border-left:3px solid var(--green)}.setup.bbb{border-left:3px solid var(--muted)}.setup.bb{border-left:3px solid var(--border2)}.setup.b{border-left:3px solid var(--border2)}
@@ -3193,8 +3254,10 @@ function downloadHtml(){
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
   {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
-  {% if cal_stale %}<div class="banner">DONNÉES PÉRIMÉES — {{cal_stale_detail}}. Affichage seul, aucune fenêtre de blackout modifiée.</div>{% endif %}
-  {% if cal_feed_truncated %}<div class="banner">COUVERTURE CALENDRIER TRONQUÉE — {{cal_feed_detail}}. La fenêtre WATCH (168h), le flag C7 (cohérence d'horizon) et le régime portefeuille peuvent surestimer l'absence de risque événementiel au-delà de cette limite.</div>{% endif %}
+  {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
+  {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
+  {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
+  {% if cal_uncovered %}<div class="banner info">DEVISES HORS COUVERTURE — {{cal_uncovered|join(', ')}} : aucun événement de ces devises dans le flux (filtre producteur : {{cal_covered|join(', ')}}). Un statut « OK » sur une paire touchant ces devises signifie « non mesuré », pas « dégagé ».</div>{% endif %}
   {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
   <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
@@ -3316,6 +3379,9 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   # aucune fenêtre de blackout ni aucun score.
                   cal_stale: bool = False,
                   cal_stale_detail: str = "",
+                  cal_merge_stale: bool = False,
+                  cal_merge_stale_detail: str = "",
+                  cal_covered_currencies: Optional[list[str]] = None,
                   version: str = __version__) -> str:
     risk = "Low"
     if calendar:
@@ -3352,6 +3418,16 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     # template — cf. principe "le HTML n'est jamais une source de vérité
     # calculée, seulement un support d'affichage/transport".
     corr_json = json.dumps(correlation_groups or {}, ensure_ascii=False).replace("</", "<\\/")
+    _cov = [c.upper() for c in (cal_covered_currencies or [])]
+    _uncovered: list[str] = []
+    if _cov:
+        _seen: set[str] = set()
+        for _sym in [s.symbol for s in setups] + [e.symbol for e in eliminated]:
+            _b, _q = _split_symbol(_sym)
+            for _leg in (_b, _q):
+                if _leg in _DESK_CURRENCIES and _leg not in _cov:
+                    _seen.add(_leg)
+        _uncovered = sorted(_seen)
     return _get_template().render(
         date_hdr=clock.date_hdr,
         date_hdr_file=date_hdr_file,
@@ -3370,6 +3446,10 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_feed_detail=cal_feed_detail,
         cal_stale=cal_stale,
         cal_stale_detail=cal_stale_detail,
+        cal_merge_stale=cal_merge_stale,
+        cal_merge_stale_detail=cal_merge_stale_detail,
+        cal_covered=_cov,
+        cal_uncovered=_uncovered,
     )
 
 
