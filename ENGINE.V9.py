@@ -42,16 +42,19 @@ from zoneinfo import ZoneInfo
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# PATCH-TZ (round du 31/07/2026, audit F-11/C-08) : fuseau d'affichage unique
-# et DST-aware pour TOUT le rendu Desk. L'ancien `timezone(timedelta(hours=1))`
-# codé en dur, doublé du littéral "GMT+1" dans le bandeau, était faux la moitié
-# de l'année (Paris = UTC+2 en heure d'été) et divergeait de la convention de la
-# couche Macro (Europe/Paris via config.TZ_CET). Repli défensif sur l'ancien
+# PATCH-TZ (round du 03/08/2026, audit croisé) : fuseau d'affichage unique et
+# DST-aware pour TOUT le rendu Desk. Le desk est à Casablanca et le module
+# calendrier (Module 04) affiche déjà Africa/Casablanca — on aligne le rapport
+# sur ce fuseau pour ne plus mélanger les étiquettes (un tel mélange faisait
+# ressembler un simple écart de fraîcheur de flux à un problème de fuseau).
+# Africa/Casablanca est UTC+1 toute l'année depuis 2018. Repli défensif sur un
 # offset fixe si la base tzdata est absente (Windows sans paquet `tzdata`) :
-# dans ce cas le comportement est STRICTEMENT celui d'avant le patch, une
+# dans ce cas le comportement est STRICTEMENT l'équivalent d'avant, une
 # exception à l'import serait une régression bien pire que l'étiquette fausse.
+# NOTE : REPORT_TZ ne sert QU'À l'affichage (Clock.date_hdr, report_filename) ;
+# tout le scoring reste intégralement ancré sur now_utc.
 try:
-    REPORT_TZ: tzinfo = ZoneInfo("Europe/Paris")
+    REPORT_TZ: tzinfo = ZoneInfo("Africa/Casablanca")
 except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     REPORT_TZ = timezone(timedelta(hours=1))
 
@@ -371,6 +374,12 @@ class CalendarData(BaseModel):
     feed_horizon_truncated: bool = False
     feed_horizon_h: Optional[float] = None  # V4-09 FIX: exposé dans le template
     feed_coverage_detail: str = ""
+    # FIX-TZ (round 03/08/2026) : l'écart d'âge entre le desk (merge.json) et le
+    # flux calendaire est un diagnostic de FRAÎCHEUR, jamais de fuseau. Non
+    # élargissant — la seule mesure "time_degraded" reste réservée à une vraie
+    # incohérence INTERNE des champs du flux (cf. load_calendar).
+    cal_stale_h: Optional[float] = None
+    cal_stale_label: str = ""
 
     def bucket(self, now: datetime) -> CalendarSets:
         """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
@@ -2570,6 +2579,8 @@ def run_pipeline(
                          cal_time_detail=calendar_data.time_audit_detail,
                          cal_feed_truncated=calendar_data.feed_horizon_truncated,
                          cal_feed_detail=calendar_data.feed_coverage_detail,
+                         cal_stale_h=calendar_data.cal_stale_h,
+                         cal_stale_label=calendar_data.cal_stale_label,
                          version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -2720,26 +2731,53 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 logger.debug("calendar event skipped: %s", exc)
 
         gen_at = _parse_iso_utc(meta.get("generated_at_utc"))
-        # V4-08 FIX : référence indépendante pour l'audit de cohérence
-        # (desk_generated_at si fourni), gen_at (calendrier) sinon — le
-        # `or` ne dégrade jamais un appel qui ne fournit pas
-        # desk_generated_at, il retombe sur l'ancien comportement.
-        _consistency_ref = desk_generated_at or gen_at
+        # FIX-TZ (round 03/08/2026, audit croisé + vérification interne) :
+        # l'audit de cohérence doit comparer les deux champs du flux à la MÊME
+        # horloge : `generated_at_utc`. `hours_until` est VOLATILE — relatif au
+        # now du Module 04 (= generated_at_utc), recalculé à chaque TTL de 5 min.
+        # L'ancien ancrage sur `desk_generated_at` (V4-08) comparait donc hours_until
+        # (ref=11:15) à (datetime_utc − desk=09:58) et mesurait littéralement
+        # (desk − gen_at) ≈ −1.28h : l'écart d'âge bénin entre deux fichiers,
+        # rebaptisé à tort « incohérence de fuseau » (faux positif systématique,
+        # cf. RUN du 03/08) et déclenchait un élargissement ±|offset| injustifié.
+        # Un vrai bug de fuseau sur datetime_utc décalerait AUSSI hours_until (tous
+        # deux dérivent du même t_utc dans calendar.enrich) : ce contrôle ne peut
+        # donc que vérifier la cohérence INTERNE des champs du flux, pas le fuseau.
+        # → on l'ancre sur gen_at : il ne se déclenchera que sur une vraie
+        # défaillance du module, plus jamais sur un écart d'âge inter-fichiers.
+        _consistency_ref = gen_at
         off, conc, tot = audit_calendar_time_consistency(events_raw, _consistency_ref)
         if tot and (conc / tot) >= CAL_TIME_MIN_RATIO and abs(off) > CAL_TIME_TOL_H:
             time_degraded = True
             time_offset = off
-            time_detail = (f"offset systématique {off:+.2f}h entre hours_until et "
-                           f"datetime_utc ({conc}/{tot} événements) — fenêtres "
-                           f"élargies de ±{abs(off):.1f}h (fail-closed)")
-            logger.error("P0-A ALERTE FUSEAU : %s", time_detail)
+            time_detail = (f"incohérence INTERNE des champs du flux : offset "
+                           f"{off:+.2f}h entre hours_until et datetime_utc "
+                           f"({conc}/{tot} événements, ref=generated_at_utc) — "
+                           f"fenêtres élargies de ±{abs(off):.1f}h (fail-closed)")
+            logger.error("P0-A CALENDAR INCOHÉRENT : %s", time_detail)
         else:
             time_degraded, time_offset, time_detail = False, 0.0, ""
+
+        # FIX-TZ (suite) : l'écart d'âge desk ↔ flux est un diagnostic de
+        # FRAÎCHEUR, distinct du fuseau. Non élargissant : le bucketing recalcul
+        # tout depuis datetime_utc (absolu) contre clock.now_utc.
+        cal_stale_h: Optional[float] = None
+        cal_stale_label = ""
+        if desk_generated_at is not None and gen_at is not None:
+            cal_stale_h = (desk_generated_at - gen_at).total_seconds() / 3600.0
+            if abs(cal_stale_h) > CAL_TIME_TOL_H:
+                _how = "plus RÉCENT que" if cal_stale_h < 0 else "plus ANCIEN que"
+                cal_stale_label = (f"flux calendaire {_how} le desk (écart "
+                                   f"≈{abs(cal_stale_h):.1f}h) — données recalculées "
+                                   f"depuis datetime_utc, aucune fenêtre élargie")
+                logger.warning("CALENDAR_STALE : %s", cal_stale_label)
 
         data = CalendarData(events=cal_events,
                             time_degraded=time_degraded,
                             time_offset_hours=time_offset,
                             time_audit_detail=time_detail,
+                            cal_stale_h=cal_stale_h,
+                            cal_stale_label=cal_stale_label,
                             # V4-09 FIX : propager le flag de troncature depuis le wrapper
                             reachable=bool(meta.get("reachable", True) if is_wrapper else True),
                             feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False) if is_wrapper else False),
@@ -3107,8 +3145,9 @@ function downloadHtml(){
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
-  {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
+  {% if cal_time_degraded %}<div class="banner">INCOHÉRENCE CALENDAIRE INTERNE — {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner">COUVERTURE CALENDRIER TRONQUÉE — {{cal_feed_detail}}. La fenêtre WATCH (168h), le flag C7 (cohérence d'horizon) et le régime portefeuille peuvent surestimer l'absence de risque événementiel au-delà de cette limite.</div>{% endif %}
+  {% if cal_stale_label %}<div class="banner" style="background:var(--royal-light);border-color:var(--royal-dim);color:var(--royal)">FRAÎCHEUR CALENDRIER — {{cal_stale_label}}.</div>{% endif %}
   {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
   <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
@@ -3225,6 +3264,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_time_detail: str = "",
                   cal_feed_truncated: bool = False,
                   cal_feed_detail: str = "",
+                  cal_stale_h: Optional[float] = None,
+                  cal_stale_label: str = "",
                   version: str = __version__) -> str:
     risk = "Low"
     if calendar:
@@ -3277,6 +3318,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_time_detail=cal_time_detail,
         cal_feed_truncated=cal_feed_truncated,
         cal_feed_detail=cal_feed_detail,
+        cal_stale_h=cal_stale_h,
+        cal_stale_label=cal_stale_label,
     )
 
 
@@ -3349,3 +3392,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
