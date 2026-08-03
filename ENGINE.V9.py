@@ -59,8 +59,13 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.2.5"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
+__version__ = "10.2.6"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
                         #   G (troncature du flux calendaire) — round 31/07/2026.
+                        # + fix CALENDAR_STALE (04/08/2026) : abs(age_h) confondait
+                        #   « calendrier périmé » et « snapshot Desk périmé », deux
+                        #   cas opposés, et affichait un signe négatif à l'écran
+                        #   dans le second cas — bannière accusant à tort le
+                        #   calendrier. Voir load_calendar().
                         # Bump délibéré : l'audit (F-02) a démontré qu'un artefact
                         # produit par un binaire non versionné n'est pas datable,
                         # donc pas auditable a posteriori.
@@ -2788,15 +2793,32 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
         stale, stale_age_h, stale_detail = False, 0.0, ""
         if desk_generated_at and gen_at:
             age_h = (desk_generated_at - gen_at).total_seconds() / 3600.0
-            if abs(age_h) > CALENDAR_STALE_TOL_H:
+            # FIX 04/08/2026 : `abs(age_h) > TOL` agrégeait deux cas opposés
+            # sous une seule étiquette « CALENDRIER PÉRIMÉ » — age_h > 0 (Desk
+            # postérieur au flux : le calendrier est bien le fichier périmé)
+            # et age_h < 0 (Desk antérieur au flux : c'est le snapshot Desk
+            # qui est périmé, pas le calendrier). Le second cas affichait en
+            # plus `{age_h:+.2f}` négatif à l'écran sans jamais nommer le bon
+            # coupable. Les deux branches sont maintenant distinguées.
+            if age_h > CALENDAR_STALE_TOL_H:
                 stale = True
                 stale_age_h = age_h
                 stale_detail = (
-                    f"calendrier généré {age_h:+.2f}h par rapport au Desk "
+                    f"calendrier antérieur au Desk de {age_h:.2f}h "
                     f"(flux: {gen_at:%H:%M:%S} UTC, Desk: {desk_generated_at:%H:%M:%S} UTC) "
                     f"— données calendaires potentiellement périmées"
                 )
                 logger.warning("CALENDAR_STALE : %s", stale_detail)
+            elif age_h < -CALENDAR_STALE_TOL_H:
+                stale = True
+                stale_age_h = -age_h
+                stale_detail = (
+                    f"snapshot Desk antérieur au calendrier de {-age_h:.2f}h "
+                    f"(Desk: {desk_generated_at:%H:%M:%S} UTC, flux: {gen_at:%H:%M:%S} UTC) "
+                    f"— données de marché (prix/ATR/RSI) potentiellement périmées, "
+                    f"calendrier plus récent"
+                )
+                logger.warning("MERGE_STALE : %s", stale_detail)
 
         data = CalendarData(events=cal_events,
                             time_degraded=time_degraded,
@@ -3171,7 +3193,7 @@ function downloadHtml(){
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
   {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
-  {% if cal_stale %}<div class="banner">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}. Affichage seul, aucune fenêtre de blackout modifiée.</div>{% endif %}
+  {% if cal_stale %}<div class="banner">DONNÉES PÉRIMÉES — {{cal_stale_detail}}. Affichage seul, aucune fenêtre de blackout modifiée.</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner">COUVERTURE CALENDRIER TRONQUÉE — {{cal_feed_detail}}. La fenêtre WATCH (168h), le flag C7 (cohérence d'horizon) et le régime portefeuille peuvent surestimer l'absence de risque événementiel au-delà de cette limite.</div>{% endif %}
   {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
