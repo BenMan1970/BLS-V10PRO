@@ -42,19 +42,16 @@ from zoneinfo import ZoneInfo
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# PATCH-TZ (round du 03/08/2026, audit croisé) : fuseau d'affichage unique et
-# DST-aware pour TOUT le rendu Desk. Le desk est à Casablanca et le module
-# calendrier (Module 04) affiche déjà Africa/Casablanca — on aligne le rapport
-# sur ce fuseau pour ne plus mélanger les étiquettes (un tel mélange faisait
-# ressembler un simple écart de fraîcheur de flux à un problème de fuseau).
-# Africa/Casablanca est UTC+1 toute l'année depuis 2018. Repli défensif sur un
+# PATCH-TZ (round du 31/07/2026, audit F-11/C-08) : fuseau d'affichage unique
+# et DST-aware pour TOUT le rendu Desk. L'ancien `timezone(timedelta(hours=1))`
+# codé en dur, doublé du littéral "GMT+1" dans le bandeau, était faux la moitié
+# de l'année (Paris = UTC+2 en heure d'été) et divergeait de la convention de la
+# couche Macro (Europe/Paris via config.TZ_CET). Repli défensif sur l'ancien
 # offset fixe si la base tzdata est absente (Windows sans paquet `tzdata`) :
-# dans ce cas le comportement est STRICTEMENT l'équivalent d'avant, une
+# dans ce cas le comportement est STRICTEMENT celui d'avant le patch, une
 # exception à l'import serait une régression bien pire que l'étiquette fausse.
-# NOTE : REPORT_TZ ne sert QU'À l'affichage (Clock.date_hdr, report_filename) ;
-# tout le scoring reste intégralement ancré sur now_utc.
 try:
-    REPORT_TZ: tzinfo = ZoneInfo("Africa/Casablanca")
+    REPORT_TZ: tzinfo = ZoneInfo("Europe/Paris")
 except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     REPORT_TZ = timezone(timedelta(hours=1))
 
@@ -304,6 +301,9 @@ DEFAULT_TIER_WINDOW = (2.0, 24.0)
 # P0-A — seuils de détection de l'incohérence de fuseau.
 CAL_TIME_TOL_H = 0.25         # tolérance individuelle (15 min)
 CAL_TIME_MIN_RATIO = 0.80     # part d'événements concordants requise
+CALENDAR_STALE_TOL_H = 0.25   # patch comité 03/08/2026, pt.2 : CACHE_TTL (5 min)
+                               # + tolérance d'ordonnancement. Seuil métier,
+                               # ajustable — indépendant de CAL_TIME_TOL_H.
 
 
 class CalendarEvent(BaseModel):
@@ -374,12 +374,13 @@ class CalendarData(BaseModel):
     feed_horizon_truncated: bool = False
     feed_horizon_h: Optional[float] = None  # V4-09 FIX: exposé dans le template
     feed_coverage_detail: str = ""
-    # FIX-TZ (round 03/08/2026) : l'écart d'âge entre le desk (merge.json) et le
-    # flux calendaire est un diagnostic de FRAÎCHEUR, jamais de fuseau. Non
-    # élargissant — la seule mesure "time_degraded" reste réservée à une vraie
-    # incohérence INTERNE des champs du flux (cf. load_calendar).
-    cal_stale_h: Optional[float] = None
-    cal_stale_label: str = ""
+    # Patch comité 03/08/2026, pt.2 : mesure de fraîcheur SÉPARÉE de l'audit
+    # de fuseau (CALENDAR_STALE). Ne passe jamais par hours_until ; compare
+    # l'horloge du Desk (merge.meta.generated_at) à celle du flux calendaire
+    # (metadata.generated_at_utc). Bannière distincte de P0-A.
+    stale: bool = False
+    stale_age_h: float = 0.0
+    stale_detail: str = ""
 
     def bucket(self, now: datetime) -> CalendarSets:
         """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
@@ -2514,9 +2515,12 @@ def _pipeline_collect_eliminated(
     preflight_rejects: list[SetupV4],
     ranked: list[SetupV4],
     final: list[SetupV4],
+    cal: Optional[CalendarSets] = None,
 ) -> list[Eliminated]:
     """Etape 11 : collecte des assets elimines (gates + preflight + non-representants)."""
-    eliminated = _collect_eliminated(universe)
+    # Patch comité 03/08/2026 (pt.3) : cal transmis pour renseigner le vrai
+    # cal_status des rejets d'univers (cf. _collect_eliminated).
+    eliminated = _collect_eliminated(universe, cal)
     eliminated.extend(_eliminated_from_setups(preflight_rejects))
     final_syms = {s.symbol for s in final}
     non_reps = [s for s in ranked if s.symbol not in final_syms]
@@ -2567,7 +2571,7 @@ def run_pipeline(
 
     # 11 — collect eliminated
     eliminated = _pipeline_collect_eliminated(
-        universe, preflight_rejects, ranked, final)
+        universe, preflight_rejects, ranked, final, cal_sets)
 
     # 12 — render (HTML)
     html = render_report(final, eliminated, meta, clock, cal_sets, themes,
@@ -2579,8 +2583,8 @@ def run_pipeline(
                          cal_time_detail=calendar_data.time_audit_detail,
                          cal_feed_truncated=calendar_data.feed_horizon_truncated,
                          cal_feed_detail=calendar_data.feed_coverage_detail,
-                         cal_stale_h=calendar_data.cal_stale_h,
-                         cal_stale_label=calendar_data.cal_stale_label,
+                         cal_stale=calendar_data.stale,
+                         cal_stale_detail=calendar_data.stale_detail,
                          version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -2595,11 +2599,19 @@ def run_pipeline(
     return html
 
 
-def _collect_eliminated(universe: Universe) -> list[Eliminated]:
+def _collect_eliminated(universe: Universe, cal: Optional[CalendarSets] = None) -> list[Eliminated]:
+    # Patch comité 03/08/2026 (pt.3) : `cal_status` était laissé au défaut du
+    # modèle (CalStatus.OK) pour tout rejet passant par ce chemin (gates
+    # preflight/univers), contrairement à `_eliminated_from_setups` qui
+    # transmet la vraie valeur — un « OK » d'affichage pouvait donc être une
+    # valeur inventée plutôt que mesurée, sur des actifs en réalité en
+    # PROXIMITY/WATCH/BLACKOUT. On calcule désormais le vrai statut via
+    # `_compute_cal_status`, comme partout ailleurs dans le pipeline.
     out: list[Eliminated] = []
     for asset, code, detail in universe.rejected:
         m = asset.mtf
         h4 = asset.rsi_by_tf.get("H4") if asset.rsi_by_tf else None
+        cal_status, _ = _compute_cal_status(asset, cal)
         out.append(Eliminated(
             symbol=asset.symbol,
             direction=(m.direction if m else Direction.NEUTRAL),
@@ -2607,6 +2619,7 @@ def _collect_eliminated(universe: Universe) -> list[Eliminated]:
             rsi_h4=(_safe_float(h4.get("value")) if isinstance(h4, dict) else None),
             age_d1=((m.age_d1 or 0) if m else 0),
             age_known=(m is not None and m.age_d1 is not None),
+            cal_status=cal_status,
             # PATCH-ASSETCLASS : `asset` (CanonicalAsset) est déjà en scope ici.
             asset_class=asset.asset_class,
         ))
@@ -2688,7 +2701,26 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
     existants) — zéro régression. `run_pipeline` le fournit désormais
     (`meta.generated_at`, disponible dans son scope avant l'appel à
     `load_calendar`), rendant le contrôle enfin capable de détecter un
-    réel décalage entre l'horloge du flux calendaire et celle du Desk."""
+    réel décalage entre l'horloge du flux calendaire et celle du Desk.
+
+    ── REVERT COMITÉ 03/08/2026 (pt.1) ─────────────────────────────────────
+    Le raisonnement ci-dessus était erroné : `audit_calendar_time_consistency`
+    calcule `hu − (dt − ref)`. Comme `hu ≈ dt − cal_gen` côté producteur, le
+    terme `dt` s'annule algébriquement quel que soit `ref` :
+        offset = (dt − cal_gen) − (dt − ref) = ref − cal_gen
+    Ce n'était donc PAS une tautologie de fuseau : c'était (et ça reste) un
+    test d'invariant de cohérence interne du flux calendaire (producteur
+    correct <=> offset ≈ 0). En passant `ref = desk_generated_at`, V4-08 a
+    transformé ce test en une simple mesure de l'écart entre deux horloges
+    de génération différentes (Desk vs flux calendaire) — un signal de
+    FRAÎCHEUR, pas de FUSEAU — et le fait se déclencher dès que les deux
+    fichiers ont plus de `CAL_TIME_TOL_H` d'écart de génération, y compris
+    sur des données parfaitement saines (8/8 concordance garantie par
+    construction algébrique, pas par la qualité des données).
+    `_consistency_ref` revient donc à `gen_at` (horloge du flux calendaire
+    lui-même) : l'audit P0-A redevient un vrai détecteur de fuseau/troncature
+    interne. La mesure de fraîcheur Desk-vs-calendrier est désormais un
+    contrôle séparé et explicitement nommé : voir CALENDAR_STALE ci-dessous."""
     if not calendar_json_path:
         return CalendarData()
     with open(calendar_json_path, encoding="utf-8") as f:
@@ -2731,58 +2763,53 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 logger.debug("calendar event skipped: %s", exc)
 
         gen_at = _parse_iso_utc(meta.get("generated_at_utc"))
-        # FIX-TZ (round 03/08/2026, audit croisé + vérification interne) :
-        # l'audit de cohérence doit comparer les deux champs du flux à la MÊME
-        # horloge : `generated_at_utc`. `hours_until` est VOLATILE — relatif au
-        # now du Module 04 (= generated_at_utc), recalculé à chaque TTL de 5 min.
-        # L'ancien ancrage sur `desk_generated_at` (V4-08) comparait donc hours_until
-        # (ref=11:15) à (datetime_utc − desk=09:58) et mesurait littéralement
-        # (desk − gen_at) ≈ −1.28h : l'écart d'âge bénin entre deux fichiers,
-        # rebaptisé à tort « incohérence de fuseau » (faux positif systématique,
-        # cf. RUN du 03/08) et déclenchait un élargissement ±|offset| injustifié.
-        # Un vrai bug de fuseau sur datetime_utc décalerait AUSSI hours_until (tous
-        # deux dérivent du même t_utc dans calendar.enrich) : ce contrôle ne peut
-        # donc que vérifier la cohérence INTERNE des champs du flux, pas le fuseau.
-        # → on l'ancre sur gen_at : il ne se déclenchera que sur une vraie
-        # défaillance du module, plus jamais sur un écart d'âge inter-fichiers.
-        _consistency_ref = gen_at
-        off, conc, tot = audit_calendar_time_consistency(events_raw, _consistency_ref)
+        # REVERT COMITÉ 03/08/2026 (pt.1) : référence = gen_at (horloge du
+        # flux calendaire lui-même), PAS desk_generated_at. Voir docstring
+        # ci-dessus pour la preuve algébrique. Ce contrôle redevient un test
+        # de cohérence interne du calendrier (vrai bug de fuseau/troncature),
+        # indépendant de l'écart de génération avec le Desk.
+        off, conc, tot = audit_calendar_time_consistency(events_raw, gen_at)
         if tot and (conc / tot) >= CAL_TIME_MIN_RATIO and abs(off) > CAL_TIME_TOL_H:
             time_degraded = True
             time_offset = off
-            time_detail = (f"incohérence INTERNE des champs du flux : offset "
-                           f"{off:+.2f}h entre hours_until et datetime_utc "
-                           f"({conc}/{tot} événements, ref=generated_at_utc) — "
-                           f"fenêtres élargies de ±{abs(off):.1f}h (fail-closed)")
-            logger.error("P0-A CALENDAR INCOHÉRENT : %s", time_detail)
+            time_detail = (f"offset systématique {off:+.2f}h entre hours_until et "
+                           f"datetime_utc ({conc}/{tot} événements) — fenêtres "
+                           f"élargies de ±{abs(off):.1f}h (fail-closed)")
+            logger.error("P0-A ALERTE FUSEAU : %s", time_detail)
         else:
             time_degraded, time_offset, time_detail = False, 0.0, ""
 
-        # FIX-TZ (suite) : l'écart d'âge desk ↔ flux est un diagnostic de
-        # FRAÎCHEUR, distinct du fuseau. Non élargissant : le bucketing recalcul
-        # tout depuis datetime_utc (absolu) contre clock.now_utc.
-        cal_stale_h: Optional[float] = None
-        cal_stale_label = ""
-        if desk_generated_at is not None and gen_at is not None:
-            cal_stale_h = (desk_generated_at - gen_at).total_seconds() / 3600.0
-            if abs(cal_stale_h) > CAL_TIME_TOL_H:
-                _how = "plus RÉCENT que" if cal_stale_h < 0 else "plus ANCIEN que"
-                cal_stale_label = (f"flux calendaire {_how} le desk (écart "
-                                   f"≈{abs(cal_stale_h):.1f}h) — données recalculées "
-                                   f"depuis datetime_utc, aucune fenêtre élargie")
-                logger.warning("CALENDAR_STALE : %s", cal_stale_label)
+        # Patch comité 03/08/2026 (pt.2) — CALENDAR_STALE : mesure de
+        # fraîcheur EXPLICITE et SÉPARÉE, Desk (desk_generated_at) vs flux
+        # calendaire (gen_at). Ne conditionne aucune fenêtre de blackout ;
+        # affichage seul ("données au ..."). Le seuil CALENDAR_STALE_TOL_H
+        # est une décision métier (cf. CACHE_TTL du producteur), pas un
+        # invariant de fuseau.
+        stale, stale_age_h, stale_detail = False, 0.0, ""
+        if desk_generated_at and gen_at:
+            age_h = (desk_generated_at - gen_at).total_seconds() / 3600.0
+            if abs(age_h) > CALENDAR_STALE_TOL_H:
+                stale = True
+                stale_age_h = age_h
+                stale_detail = (
+                    f"calendrier généré {age_h:+.2f}h par rapport au Desk "
+                    f"(flux: {gen_at:%H:%M:%S} UTC, Desk: {desk_generated_at:%H:%M:%S} UTC) "
+                    f"— données calendaires potentiellement périmées"
+                )
+                logger.warning("CALENDAR_STALE : %s", stale_detail)
 
         data = CalendarData(events=cal_events,
                             time_degraded=time_degraded,
                             time_offset_hours=time_offset,
                             time_audit_detail=time_detail,
-                            cal_stale_h=cal_stale_h,
-                            cal_stale_label=cal_stale_label,
+                            stale=stale,
+                            stale_age_h=stale_age_h,
+                            stale_detail=stale_detail,
                             # V4-09 FIX : propager le flag de troncature depuis le wrapper
                             reachable=bool(meta.get("reachable", True) if is_wrapper else True),
                             feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False) if is_wrapper else False),
                             feed_horizon_h=meta.get("feed_horizon_h") if is_wrapper else None,
-                            feed_horizon_detail=meta.get("feed_coverage_detail", "") if is_wrapper else "")
+                            feed_coverage_detail=meta.get("feed_coverage_detail", "") if is_wrapper else "")
     else:
         # Format CalendarData natif : validation directe (comportement original)
         data = CalendarData.model_validate_json(raw)
@@ -2792,11 +2819,9 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
     # modifiée ici : on rend visible une limite de couverture qui était
     # jusqu'ici silencieuse et indistinguable d'une absence de risque.
     # V4-09 FIX : détecter aussi les flux vides/non-reachables → fail-closed
-    should_have_events = data.events or (not is_wrapper and meta.get("events")) or not is_wrapper
-    is_truncated_or_unreachable = (
-        (is_wrapper and (not meta.get("reachable", True) or meta.get("feed_horizon_truncated", False)))
-        or (not data.events and is_wrapper)
-    )
+    # Nettoyage comité 03/08/2026 (pt.4) : `should_have_events` et
+    # `is_truncated_or_unreachable` étaient calculées puis jamais lues
+    # (mortes) — supprimées, aucun comportement n'en dépendait.
     if data.events:
         _ref = gen_at if (is_wrapper and gen_at is not None) else data.parsed_at
         # Défensif : parsed_at n'a pas de validateur de fuseau et un
@@ -3145,9 +3170,9 @@ function downloadHtml(){
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
-  {% if cal_time_degraded %}<div class="banner">INCOHÉRENCE CALENDAIRE INTERNE — {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
+  {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
+  {% if cal_stale %}<div class="banner">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}. Affichage seul, aucune fenêtre de blackout modifiée.</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner">COUVERTURE CALENDRIER TRONQUÉE — {{cal_feed_detail}}. La fenêtre WATCH (168h), le flag C7 (cohérence d'horizon) et le régime portefeuille peuvent surestimer l'absence de risque événementiel au-delà de cette limite.</div>{% endif %}
-  {% if cal_stale_label %}<div class="banner" style="background:var(--royal-light);border-color:var(--royal-dim);color:var(--royal)">FRAÎCHEUR CALENDRIER — {{cal_stale_label}}.</div>{% endif %}
   {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
   {% if setups %}
   <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
@@ -3264,8 +3289,11 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_time_detail: str = "",
                   cal_feed_truncated: bool = False,
                   cal_feed_detail: str = "",
-                  cal_stale_h: Optional[float] = None,
-                  cal_stale_label: str = "",
+                  # Patch comité 03/08/2026 (pt.2) : bannière CALENDAR_STALE,
+                  # distincte de l'ALERTE FUSEAU — pur affichage, ne modifie
+                  # aucune fenêtre de blackout ni aucun score.
+                  cal_stale: bool = False,
+                  cal_stale_detail: str = "",
                   version: str = __version__) -> str:
     risk = "Low"
     if calendar:
@@ -3318,8 +3346,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_time_detail=cal_time_detail,
         cal_feed_truncated=cal_feed_truncated,
         cal_feed_detail=cal_feed_detail,
-        cal_stale_h=cal_stale_h,
-        cal_stale_label=cal_stale_label,
+        cal_stale=cal_stale,
+        cal_stale_detail=cal_stale_detail,
     )
 
 
@@ -3392,4 +3420,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
