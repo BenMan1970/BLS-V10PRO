@@ -59,13 +59,24 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.2.6"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
+__version__ = "10.2.7"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
                         #   G (troncature du flux calendaire) — round 31/07/2026.
                         # + fix CALENDAR_STALE (04/08/2026) : abs(age_h) confondait
                         #   « calendrier périmé » et « snapshot Desk périmé », deux
                         #   cas opposés, et affichait un signe négatif à l'écran
                         #   dans le second cas — bannière accusant à tort le
                         #   calendrier. Voir load_calendar().
+                        # + PATCH-CALCOVERAGE (04/08/2026, audit synergie pipeline
+                        #   Comité×Macro×Desk, Proposition 2 validée) : export
+                        #   JSON structuré <script id="calendar-coverage"> —
+                        #   covered/uncovered (déjà calculés pour la bannière),
+                        #   feed_end_utc/horizon_h (nouveaux champs additifs sur
+                        #   CalendarData, défaut None). Même patron que
+                        #   correlation-groups. Aucune décision, aucun score,
+                        #   aucun cap, aucune fenêtre de blackout modifiés —
+                        #   pur transport pour permettre au Comité de joindre
+                        #   « OK » à « non mesuré » par jambe au lieu du niveau
+                        #   document (cf. C-3 du rapport de calibration).
                         # Bump délibéré : l'audit (F-02) a démontré qu'un artefact
                         # produit par un binaire non versionné n'est pas datable,
                         # donc pas auditable a posteriori.
@@ -400,6 +411,13 @@ class CalendarData(BaseModel):
     merge_stale_detail: str = ""
     # metadata.filters_applied.currencies — lu, plus ignoré
     covered_currencies: list[str] = Field(default_factory=list)
+    # PATCH-CALCOVERAGE (audit synergie pipeline, 04/08/2026) : borne haute
+    # réelle du flux calendaire, calculée une seule fois dans load_calendar()
+    # à partir des événements. Champ additif, défaut None — n'est lu par
+    # aucune décision existante ; sert uniquement à l'export JSON structuré
+    # de render_report (cf. calendar-coverage). Aucune fenêtre de blackout,
+    # aucun score, aucun cap n'en dépend.
+    feed_end_utc: Optional[datetime] = None
 
     def bucket(self, now: datetime) -> CalendarSets:
         """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
@@ -2637,6 +2655,8 @@ def run_pipeline(
                          cal_merge_stale=calendar_data.merge_stale,
                          cal_merge_stale_detail=calendar_data.merge_stale_detail,
                          cal_covered_currencies=calendar_data.covered_currencies,
+                         cal_feed_end_utc=calendar_data.feed_end_utc,
+                         cal_feed_horizon_h=calendar_data.feed_horizon_h,
                          version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
@@ -2909,6 +2929,12 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
             _ref = _ref.replace(tzinfo=timezone.utc)
         _feed_end = max(ev.datetime_utc for ev in data.events)
         _horizon_h = (_feed_end - _ref).total_seconds() / 3600.0
+        # PATCH-CALCOVERAGE (04/08/2026) : exposer la borne réelle et
+        # l'horizon calculé indépendamment du seuil WATCH_MAX_H — additif,
+        # ne modifie ni feed_horizon_truncated ni feed_coverage_detail
+        # ci-dessous, qui restent calculés exactement comme avant.
+        data.feed_end_utc = _feed_end
+        data.feed_horizon_h = _horizon_h
         if _horizon_h < WATCH_MAX_H:
             data.feed_horizon_truncated = True
             data.feed_coverage_detail = (
@@ -3350,6 +3376,7 @@ function downloadHtml(){
 </div>
 <div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
 <script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
+      <script type="application/json" id="calendar-coverage">{{ calendar_coverage_json | safe }}</script>
 </div>
 </body></html>"""
 
@@ -3382,6 +3409,11 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_merge_stale: bool = False,
                   cal_merge_stale_detail: str = "",
                   cal_covered_currencies: Optional[list[str]] = None,
+                  # PATCH-CALCOVERAGE (04/08/2026) : additif, défaut None ->
+                  # export JSON avec feed_end_utc/horizon_h nuls, comportement
+                  # de rendu par ailleurs strictement inchangé.
+                  cal_feed_end_utc: Optional[datetime] = None,
+                  cal_feed_horizon_h: Optional[float] = None,
                   version: str = __version__) -> str:
     risk = "Low"
     if calendar:
@@ -3428,6 +3460,20 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                 if _leg in _DESK_CURRENCIES and _leg not in _cov:
                     _seen.add(_leg)
         _uncovered = sorted(_seen)
+    # PATCH-CALCOVERAGE (audit synergie pipeline, 04/08/2026, Proposition 2) :
+    # export structuré de la couverture calendaire, calqué exactement sur le
+    # patron correlation-groups déjà en production (corr_json ci-dessus).
+    # Purement additif : _cov/_uncovered sont déjà calculés plus haut pour la
+    # bannière HTML existante, aucune nouvelle logique de décision. Absence
+    # de calendrier -> listes vides, feed_end_utc/horizon_h null.
+    _cal_coverage = {
+        "covered": _cov,
+        "uncovered": _uncovered,
+        "feed_end_utc": cal_feed_end_utc.isoformat() if cal_feed_end_utc else None,
+        "horizon_h": (round(cal_feed_horizon_h, 2)
+                      if cal_feed_horizon_h is not None else None),
+    }
+    cal_coverage_json = json.dumps(_cal_coverage, ensure_ascii=False).replace("</", "<\\/")
     return _get_template().render(
         date_hdr=clock.date_hdr,
         date_hdr_file=date_hdr_file,
@@ -3450,6 +3496,7 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_merge_stale_detail=cal_merge_stale_detail,
         cal_covered=_cov,
         cal_uncovered=_uncovered,
+        calendar_coverage_json=cal_coverage_json,
     )
 
 
