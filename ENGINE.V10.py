@@ -3,17 +3,24 @@ BLUESTAR ENGINE v10 — Hybrid Absolute/Cross-Sectional (V4 architecture)
 ========================================================================
 Single-file monolithic engine. Source of truth = merged JSON.
 
-Pipeline : Pydantic, mode dégradé, calendrier tiéré, ATR synthétique,
-preflight, audit trail, 7 facteurs V4, moyenne absolue -> conviction,
-quantile -> tie-break/diversification.
+Pipeline logique INCHANGÉ vs version précédente (Pydantic, mode dégradé,
+calendrier tiéré, ATR synthétique, preflight, audit trail, 7 facteurs V4,
+moyenne absolue -> conviction, quantile -> tie-break/diversification).
 
-Rendu : PDF natif via WeasyPrint si disponible (optionnel, jamais
-bloquant) ; sinon HTML calibré A4 imprimable via le navigateur.
+NOUVEAUTÉ (couche rendu uniquement) :
+  - Génération PDF NATIVE via WeasyPrint (moteur HTML/CSS->PDF maîtrisé)
+    => document A4 calibré, marges uniformes, en-tête/pied paginés,
+       anti-coupure des cartes (break-inside), échelle typographique cohérente.
+  - Le HTML interactif reste disponible ; le bouton "print" est conservé
+    en repli si WeasyPrint n'est pas installé.
 
 Usage:
-  python ENGINE.V10.py --merged merge.json --calendar-json calendar.json -o report.html
-  python ENGINE.V10.py --merged merge.json --calendar-json calendar.json --pdf report.pdf
-  from ENGINE.V10 import run_pipeline, render_pdf   # API (nom de module à adapter)
+  # HTML
+  python v10.py --merged merge.json --calendar-json calendar.json -o report.html
+  # PDF natif calibré
+  python v10.py --merged merge.json --calendar-json calendar.json --pdf report.pdf
+  # API
+  from v10 import run_pipeline, render_pdf
 """
 from __future__ import annotations
 
@@ -35,44 +42,60 @@ from zoneinfo import ZoneInfo
 import jinja2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Fuseau d'affichage unique, DST-aware (Europe/Paris). Repli défensif sur
-# l'ancien offset fixe si tzdata est absente (Windows sans paquet tzdata).
+# PATCH-TZ (round du 31/07/2026, audit F-11/C-08) : fuseau d'affichage unique
+# et DST-aware pour TOUT le rendu Desk. L'ancien `timezone(timedelta(hours=1))`
+# codé en dur, doublé du littéral "GMT+1" dans le bandeau, était faux la moitié
+# de l'année (Paris = UTC+2 en heure d'été) et divergeait de la convention de la
+# couche Macro (Europe/Paris via config.TZ_CET). Repli défensif sur l'ancien
+# offset fixe si la base tzdata est absente (Windows sans paquet `tzdata`) :
+# dans ce cas le comportement est STRICTEMENT celui d'avant le patch, une
+# exception à l'import serait une régression bien pire que l'étiquette fausse.
 try:
     REPORT_TZ: tzinfo = ZoneInfo("Europe/Paris")
-except Exception:  # noqa: BLE001
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     REPORT_TZ = timezone(timedelta(hours=1))
 
 logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.2.9"  # 10.2.9 : nettoyage code mort + finalisation déploiement
-                        #   cloud-safe (import WeasyPrint optionnel avec raison
-                        #   d'échec exposée, render_pdf ne lève plus, version
-                        #   passée au template, coquilles corrigées).
-                        # 10.2.7 : patches E (badge SR granulaire), F (fuseau
-                        #   DST-aware), G (troncature flux calendaire).
-                        # 04/08/2026 : fix CALENDAR_STALE (deux conditions
-                        #   opposées, jamais abs()) + PATCH-CALCOVERAGE (export
-                        #   JSON structuré calendar-coverage, additif).
+__version__ = "10.2.7"  # + patches E (badge SR granulaire), F (fuseau DST-aware),
+                        #   G (troncature du flux calendaire) — round 31/07/2026.
+                        # + fix CALENDAR_STALE (04/08/2026) : abs(age_h) confondait
+                        #   « calendrier périmé » et « snapshot Desk périmé », deux
+                        #   cas opposés, et affichait un signe négatif à l'écran
+                        #   dans le second cas — bannière accusant à tort le
+                        #   calendrier. Voir load_calendar().
+                        # + PATCH-CALCOVERAGE (04/08/2026, audit synergie pipeline
+                        #   Comité×Macro×Desk, Proposition 2 validée) : export
+                        #   JSON structuré <script id="calendar-coverage"> —
+                        #   covered/uncovered (déjà calculés pour la bannière),
+                        #   feed_end_utc/horizon_h (nouveaux champs additifs sur
+                        #   CalendarData, défaut None). Même patron que
+                        #   correlation-groups. Aucune décision, aucun score,
+                        #   aucun cap, aucune fenêtre de blackout modifiés —
+                        #   pur transport pour permettre au Comité de joindre
+                        #   « OK » à « non mesuré » par jambe au lieu du niveau
+                        #   document (cf. C-3 du rapport de calibration).
+                        # Bump délibéré : l'audit (F-02) a démontré qu'un artefact
+                        # produit par un binaire non versionné n'est pas datable,
+                        # donc pas auditable a posteriori.
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 0 — Optional PDF backend (never blocking at import)
+# SECTION 0 — OPTIONAL upstream import (graceful fallback, never blocking)
 # ════════════════════════════════════════════════════════════════════════════
-# Sur Streamlit Community Cloud, WeasyPrint est absent (libs natives
-# libpango/libcairo non installables). On mémorise la raison exacte de
-# l'échec pour que la couche UI puisse l'afficher.
+# FIX-E01: import merge_appbackup supprimé (module inexistant, _HAS_UPSTREAM inutilisé)
+
+# Optional PDF backend — native, calibrated rendering. Never blocking at import.
 try:  # pragma: no cover
-    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]
+    from weasyprint import HTML as _WeasyHTML  # type: ignore[import-untyped]  # pylint: disable=import-error
     _HAS_WEASYPRINT = True
-    _WEASYPRINT_ERROR = ""
-except Exception as _wp_exc:  # noqa: BLE001
+except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
     _HAS_WEASYPRINT = False
-    _WEASYPRINT_ERROR = f"{type(_wp_exc).__name__}: {_wp_exc}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — ENUMS
+# SECTION 1 — ENUMS  (ported from v9; Conviction extended with BB/B)
 # ════════════════════════════════════════════════════════════════════════════
 class Direction(str, Enum):
     BULLISH = "Bullish"
@@ -142,7 +165,7 @@ _CONVICTION_ORDINAL: Mapping[str, int] = MappingProxyType({
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — HELPERS
+# SECTION 2 — HELPERS  (ported verbatim from v9)
 # ════════════════════════════════════════════════════════════════════════════
 def _dir_eq(a: Any, b: Any) -> bool:
     av = a.value if hasattr(a, "value") else str(a)
@@ -166,13 +189,13 @@ def _safe_float(v: Any) -> Optional[float]:
         if v is None:
             return None
         f = float(v)
-        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124
+        return f if f == f and f not in (float("inf"), float("-inf")) else None  # noqa: PLR0124  # pylint: disable=comparison-with-itself
     except (TypeError, ValueError):
         return None
 
 
 def _clamp01(x: float) -> float:
-    if x != x:
+    if x != x:  # pylint: disable=comparison-with-itself
         return 0.0
     return max(0.0, min(1.0, x))
 
@@ -212,7 +235,8 @@ def _parse_iso_utc(raw: Any) -> Optional[datetime]:
 
 
 # ── P1-B : comptage de bougies FX-aware ─────────────────────────────────────
-# Semaine FX : dimanche 21:00 UTC -> vendredi 21:00 UTC.
+# Semaine FX : dimanche 21:00 UTC -> vendredi 21:00 UTC. Un comptage naïf en
+# heures calendaires produirait des faux positifs systématiques le lundi.
 _FX_WEEK_CLOSE_WEEKDAY = 4        # Friday (Monday=0)
 _FX_WEEK_CLOSE_HOUR = 21
 _FX_WEEK_CLOSED_HOURS = 48.0
@@ -254,7 +278,7 @@ def _elapsed_bars_fx(start: datetime, end: datetime, timeframe: str) -> int:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — CALENDAR MODELS
+# SECTION 3 — CALENDAR MODELS  (ported verbatim from v9 — do not break)
 # ════════════════════════════════════════════════════════════════════════════
 _TIER_S = ("non-farm", "nonfarm", "nfp", "fomc", "cpi", "cash rate",
            "bank rate", "rate statement", "interest rate", "monetary policy",
@@ -293,11 +317,15 @@ DEFAULT_TIER_WINDOW = (2.0, 24.0)
 # P0-A — seuils de détection de l'incohérence de fuseau.
 CAL_TIME_TOL_H = 0.25         # tolérance individuelle (15 min)
 CAL_TIME_MIN_RATIO = 0.80     # part d'événements concordants requise
-CALENDAR_STALE_TOL_H = 0.25   # calendrier ANTÉRIEUR au Desk (seuil métier)
-MERGE_STALE_TOL_H = 0.25      # merge ANTÉRIEUR au calendrier
+CALENDAR_STALE_TOL_H = 0.25   # patch comité 03/08/2026, pt.2 : CACHE_TTL (5 min)
+                               # + tolérance d'ordonnancement. Seuil métier,
+                               # ajustable — indépendant de CAL_TIME_TOL_H.
+                               # calendrier ANTÉRIEUR au Desk
+MERGE_STALE_TOL_H = 0.25      # merge ANTÉRIEUR au calendrier (patch 04/08/2026)
 
-# Devises réellement traitées par le desk (vs jambes-instruments : US30,
-# NAS100, SPX500, DE30, XAU — un indice n'a pas de calendrier propre).
+# Devises réellement traitées par le desk. Sert à distinguer une jambe-devise
+# d'une jambe-instrument (US30, NAS100, SPX500, DE30, XAU) lors du contrôle de
+# couverture du flux calendaire — un indice n'a pas de calendrier propre.
 _DESK_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"})
 
 
@@ -308,6 +336,7 @@ class CalendarEvent(BaseModel):
     datetime_utc: datetime
     impact: Optional[ImpactLevel] = None
     tier: EventTier = EventTier.NONE
+    # R2 — champs Module 04 ingérés (tous optionnels, zero regression)
     actual: Optional[str] = None
     forecast: Optional[str] = None
     previous: Optional[str] = None
@@ -343,8 +372,8 @@ class CalendarSets(BaseModel):
     watch_ccy: set[str] = Field(default_factory=set)
     time_degraded: bool = False
     time_offset_hours: float = 0.0
-    # Le flag feed_horizon_truncated doit atteindre f7_macro pour déclencher
-    # le fail-closed sur un flux tronqué ou vide.
+    # V4-09 FIX : le flag feed_horizon_truncated doit atteindre f7_macro
+    # pour déclencher le fail-closed sur un flux tronqué ou vide.
     feed_horizon_truncated: bool = False
     covered_currencies: list[str] = Field(default_factory=list)
 
@@ -365,10 +394,14 @@ class CalendarData(BaseModel):
     time_degraded: bool = False
     time_offset_hours: float = 0.0
     time_audit_detail: str = ""
-    reachable: bool = True
+    reachable: bool = True  # V4-09 FIX: le flux peut être injoignable
     feed_horizon_truncated: bool = False
-    feed_horizon_h: Optional[float] = None
+    feed_horizon_h: Optional[float] = None  # V4-09 FIX: exposé dans le template
     feed_coverage_detail: str = ""
+    # Patch comité 03/08/2026, pt.2 : mesure de fraîcheur SÉPARÉE de l'audit
+    # de fuseau (CALENDAR_STALE). Ne passe jamais par hours_until ; compare
+    # l'horloge du Desk (merge.meta.generated_at) à celle du flux calendaire
+    # (metadata.generated_at_utc). Bannière distincte de P0-A.
     # Fraîcheur — DEUX conditions OPPOSÉES, jamais agrégées par abs().
     stale: bool = False              # CALENDAR_STALE : calendrier antérieur au Desk
     stale_age_h: float = 0.0
@@ -376,15 +409,23 @@ class CalendarData(BaseModel):
     merge_stale: bool = False        # MERGE_STALE : snapshot marché antérieur au calendrier
     merge_stale_age_h: float = 0.0
     merge_stale_detail: str = ""
+    # metadata.filters_applied.currencies — lu, plus ignoré
     covered_currencies: list[str] = Field(default_factory=list)
-    # Borne haute réelle du flux, calculée dans load_calendar(). Additif :
-    # ne sert qu'à l'export JSON calendar-coverage, aucune décision n'en dépend.
+    # PATCH-CALCOVERAGE (audit synergie pipeline, 04/08/2026) : borne haute
+    # réelle du flux calendaire, calculée une seule fois dans load_calendar()
+    # à partir des événements. Champ additif, défaut None — n'est lu par
+    # aucune décision existante ; sert uniquement à l'export JSON structuré
+    # de render_report (cf. calendar-coverage). Aucune fenêtre de blackout,
+    # aucun score, aucun cap n'en dépend.
     feed_end_utc: Optional[datetime] = None
 
     def bucket(self, now: datetime) -> CalendarSets:
-        """Si time_degraded, toutes les fenêtres sont élargies de |offset|
-        DES DEUX CÔTÉS (fail-closed : les deux champs temporels du feed se
-        contredisent, rien ne prouve lequel est correct)."""
+        """P0-A : si time_degraded, toutes les fenêtres sont élargies de |offset|
+        DES DEUX CÔTÉS. Fail-closed délibéré — les deux champs temporels du feed
+        se contredisent, rien ne prouve lequel est correct ; élargir est
+        conservateur dans les deux hypothèses. Corriger datetime_utc par +offset
+        supposerait que hours_until est la vérité : supposition non démontrée.
+        """
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         pad = abs(self.time_offset_hours) if self.time_degraded else 0.0
@@ -435,7 +476,7 @@ def audit_calendar_time_consistency(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — CANONICAL ASSET VIEW
+# SECTION 4 — CANONICAL ASSET VIEW  (ported from v9; +conviction_cap)
 # ════════════════════════════════════════════════════════════════════════════
 class MTFView(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -471,7 +512,8 @@ class StructureEventView(BaseModel):
     bb_regime: str = "Normal"
     session: str = ""
     candles_elapsed: int = 999
-    signal_time: Optional[datetime] = None  # P1-B
+    # P1-B — présent dans le feed, jeté jusqu'ici par extra="ignore".
+    signal_time: Optional[datetime] = None
 
     @field_validator("direction", mode="before")
     @classmethod
@@ -491,7 +533,7 @@ class ZoneView(BaseModel):
     level: float
     side: str = ""
     score: float = 0.0
-    weighted_score: float = 0.0
+    weighted_score: float = 0.0      # score pondéré par TF (déjà calculé en amont)
     distance_pct: float = 999.0
     timeframes: list[str] = Field(default_factory=list)
     has_weekly: bool = False
@@ -506,8 +548,9 @@ class CanonicalAsset(BaseModel):
     quote: Optional[str] = None
     asset_class: str = "forex"
     current_price: Optional[float] = None
-    # Déclaré explicitement pour ne pas être jeté par extra="ignore".
-    current_price_source: Optional[str] = None  # "stale", "live", etc.
+    # V4-01 FIX : le champ current_price_source était silencieusement ignoré
+    # (extra="ignore"). Déclaration explicite pour retenir la source (stale, live, etc.)
+    current_price_source: Optional[str] = None  # V4: "stale", "live", etc.
     rsi_by_tf: dict[str, dict] = Field(default_factory=dict)
     rsi_h4_status: Optional[str] = None
     mtf: Optional[MTFView] = None
@@ -518,8 +561,10 @@ class CanonicalAsset(BaseModel):
     atr_source: Optional[str] = None
     nearest_aligned_zone: Optional[ZoneView] = None
     hot_zone_primary: Optional[ZoneView] = None
-    conviction_cap: Optional[str] = None  # ex. "BBB" pour ATR synthétique
-    # v3.5.0: produced by merge engine, read-only here. None si absent/crash.
+    conviction_cap: Optional[str] = None  # V4: mapped from JSON (e.g. "BBB" for synthetic ATR)
+    c7_flag: Optional[str] = None  # V4-08: délai event S/A (HH:MM approximatif)
+    # v3.5.0: produced by merge engine, read-only here.
+    # None when market_context absent or merge engine crashed on this asset.
     market_context: Optional[dict[str, Any]] = None
 
 
@@ -541,15 +586,19 @@ class Clock(BaseModel):
     now_local: datetime
     date_hdr: str
 
-    # ClassVar OBLIGATOIRE : sans ça, Pydantic v2 traiterait `_REPORT_TZ`
-    # comme un attribut privé et cls._REPORT_TZ rendrait un ModelPrivateAttr.
+    # C-08 (audit 31/07/2026) : fuseau d'affichage unique, DST-aware.
+    # ClassVar est OBLIGATOIRE ici — sans cette annotation, Pydantic v2
+    # traiterait `_REPORT_TZ` (préfixe underscore) comme un attribut privé
+    # et `cls._REPORT_TZ` retournerait un ModelPrivateAttr, pas le fuseau.
     _REPORT_TZ: ClassVar[tzinfo] = REPORT_TZ
 
     @classmethod
     def from_meta(cls, generated_at: datetime) -> "Clock":
         now_utc = generated_at if generated_at.tzinfo else generated_at.replace(tzinfo=timezone.utc)
         now_local = now_utc.astimezone(cls._REPORT_TZ)
-        # Étiquette = fuseau RÉEL (CET/CEST). Scoring ancré sur now_utc.
+        # L'étiquette suit le fuseau RÉEL (CET l'hiver, CEST l'été) au lieu du
+        # littéral "GMT+1". L'heure affichée était déjà juste ; c'est l'étiquette
+        # qui mentait. Le scoring reste intégralement ancré sur now_utc.
         tz_label = now_local.tzname() or "CET"
         return cls(now_utc=now_utc, now_local=now_local,
                    date_hdr=f"{now_local.strftime('%Y-%m-%d %H:%M')} {tz_label}")
@@ -558,6 +607,9 @@ class Clock(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — V4 MODELS & DATACLASSES
 # ════════════════════════════════════════════════════════════════════════════
+_FACTOR_NAMES = ("f1_hwa", "f2_rmg", "f3_ext", "f4_trg", "f5_xctx", "f6_theme", "f7_macro")
+
+
 @dataclass(frozen=True)
 class ScoredFactor:
     name: str
@@ -594,9 +646,15 @@ class FactorVector:
 
 @dataclass(frozen=True)
 class Flag:
-    code: str               # "C1".."C11"
+    code: str               # "C1".."C5"
     severity: str           # "minor" | "major"
     detail: str
+
+
+@dataclass
+class RiskCluster:
+    key: str
+    members: list[str] = field(default_factory=list)
 
 
 class FactorScores(BaseModel):
@@ -608,7 +666,7 @@ class FactorScores(BaseModel):
     f5_xctx: float = 0.0
     f6_theme: float = 0.0
     f7_macro: float = 0.0
-    absolute_mean: float = 0.0        # score post-decay (conviction + ranking)
+    absolute_mean: float = 0.0        # score post-decay (utilisé pour conviction + ranking)
     absolute_mean_raw: float = 0.0    # score pré-decay (audit uniquement)
     decay_factor: float = 1.0         # multiplicateur appliqué [DECAY_FLOOR, 1.0]
     decay_source: str = "age"
@@ -626,6 +684,7 @@ class FlagModel(BaseModel):
 
 class SetupV4(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    # — ported from v9 —
     symbol: str
     direction: Direction
     scenario_hint: str = ""
@@ -639,14 +698,19 @@ class SetupV4(BaseModel):
     tp2_atr_multiple: Optional[float] = None
     rr: float = 0.0
     rr_synthetic: bool = False
-    # Granularité TP1/TP2 pour le badge SR. None = ancien schéma -> legacy.
+    # PATCH-SRBADGE (round du 31/07/2026, audit F-10/C-07) : granularité
+    # TP1/TP2 nécessaire au badge SR. `rr_synthetic` (= TP1 OU TP2 synthétique)
+    # masquait un TP2 ancré sur une zone SR réelle — cas EUR/CAD du 31/07 :
+    # TP2 = 1,62543 = zone SELL W1/D1/H4 du merge, mais badge "SR indisponible"
+    # affiché parce que TP1 était synthétique. None = non déterminé (objet
+    # sérialisé sous l'ancien schéma) → le rendu retombe sur la logique legacy.
     tp1_synthetic: Optional[bool] = None
     tp2_synthetic: Optional[bool] = None
     atr_effective: float = 0.0
     atr_source: str = "unknown"
     distance_atr: float = 0.0
     choch_score: Optional[float] = None
-    choch_info: Optional[str] = None   # ex: "H4 Bearish 85 (3c)"
+    choch_info: Optional[str] = None   # label court si CHoCH présent (aligné ou non) ex: "H4 Bearish 85 (3c)"
     gps_quality: Optional[str] = None
     mtf_pct: int = 0
     rsi_h4: Optional[float] = None
@@ -658,6 +722,7 @@ class SetupV4(BaseModel):
     sl_detail: str = ""
     rr_detail: str = ""
     rationale: str = ""
+    # — V4 —
     conviction: Conviction = Conviction.BBB
     factor_scores: FactorScores = Field(default_factory=FactorScores)
     flags: list[FlagModel] = Field(default_factory=list)
@@ -665,9 +730,14 @@ class SetupV4(BaseModel):
     capped_reason: Optional[str] = None
     reject_code: Optional[str] = None
     reject_detail: Optional[str] = None
-    current_price: float = 0.0          # snapshot pour preflight PRICE_PAST_TP
-    asset_class: str = "forex"          # propagé depuis CanonicalAsset
-    age_known: bool = True              # P1-A
+    # FIX-PRICE-PAST-TP: prix courant au moment du scan, utilisé par preflight
+    current_price: float = 0.0
+    # PATCH-ASSETCLASS (audit comité 27/07/2026) : ported from CanonicalAsset,
+    # perdu jusqu'ici entre l'ingestion et le rendu HTML. Défaut "forex"
+    # identique au défaut de CanonicalAsset.asset_class — zéro régression pour
+    # tout appelant qui ignorait déjà ce champ.
+    asset_class: str = "forex"
+    age_known: bool = True                          # P1-A
     horizon_days: Optional[float] = None            # P0-B
     horizon_event: Optional[str] = None
     horizon_event_days: Optional[float] = None
@@ -693,22 +763,25 @@ class Eliminated(BaseModel):
     cal_status: CalStatus = CalStatus.OK
     rr: Optional[float] = None
     age_known: bool = True
+    # PATCH-ASSETCLASS (audit comité 27/07/2026) : cf. SetupV4.asset_class.
     asset_class: str = "forex"
 
 
 @dataclass
 class MarketThemes:
     strong: dict[str, str] = field(default_factory=dict)        # ccy -> "Bullish"/"Bearish"
-    cohesion: dict[str, float] = field(default_factory=dict)    # ccy -> [0,1]
+    cohesion: dict[str, float] = field(default_factory=dict)    # ccy -> [0,1] consensus strength
 
     def bonus_for(self, base: str, quote: Optional[str], direction: Direction) -> float:
         """F6 score in [0,1]: how well the trade rides dominant currency themes."""
         d = direction.value
         inv = "Bearish" if d == "Bullish" else "Bullish"
         contributions: list[float] = []
+        # base leg
         if base in self.strong:
             coh = self.cohesion.get(base, 0.0)
             contributions.append(coh if self.strong[base] == d else -coh)
+        # quote leg (inverse)
         if quote and quote in self.strong:
             coh = self.cohesion.get(quote, 0.0)
             contributions.append(coh if self.strong[quote] == inv else -coh)
@@ -733,11 +806,11 @@ class MarketThemes:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — CONFIG
+# SECTION 6 — CONFIG  (V4 thresholds; structural common-sense, not calibrated)
 # ════════════════════════════════════════════════════════════════════════════
 @dataclass(frozen=True)
 class V4Config:
-    # universe
+    # universe (ported from v9)
     MIN_QUALITY: frozenset = frozenset({"A+", "A"})
     MIN_CONSENSUS_PCT: int = 50
     # F1 HWA — ordinal seniority weights
@@ -754,12 +827,12 @@ class V4Config:
     TRG_SCORE_CAP: float = 85.0
     TRG_FRESH_MAX: int = 6
     TRG_DIST_ATR_MAX: float = 1.0
-    # SR structure bonus dans F4
-    SR_BONUS_MAX: float = 0.20
-    SR_DIST_MAX_PCT: float = 2.0
-    SR_W_W1: float = 0.50
-    SR_W_D1: float = 0.30
-    SR_W_H4: float = 0.20
+    # SR structure bonus dans F4 (zone SR multi-TF proche du trigger)
+    SR_BONUS_MAX: float = 0.20       # bonus max ajouté au score F4 si zone SR multi-TF alignée
+    SR_DIST_MAX_PCT: float = 2.0     # distance max (%) pour qu'une zone soit considérée proche
+    SR_W_W1: float = 0.50            # poids W1 dans le score SR composite
+    SR_W_D1: float = 0.30            # poids D1
+    SR_W_H4: float = 0.20            # poids H4
     # F6 THEME
     THEME_MIN_VOTES: int = 3
     THEME_BULL_HI: float = 0.8
@@ -775,39 +848,57 @@ class V4Config:
     BB_MIN: float = 0.30
     MACRO_CAP_RISK_THRESHOLD: float = 0.50   # macro RISK >= 0.5 -> cap AA
     # [OPT-IN — DÉFAUT = COMPORTEMENT ACTUEL, BIT POUR BIT]
-    # False : un flux tronqué neutralise f7 pour TOUS les actifs (cap AA
-    #         universel — le flag est structurellement toujours vrai sur un
-    #         flux hebdomadaire).
-    # True  : f7 reste MESURÉ si le prochain event S/A tombe DANS la fenêtre
-    #         couverte ; fail-closed conservé si le silence est invérifiable.
-    # MODIFIE LES CONVICTIONS. Exige un A/B sur >= 20 sessions archivées.
+    # False : un flux tronqué neutralise f7 pour TOUS les actifs. Constat
+    #         d'audit : le flag est structurellement toujours vrai sur un flux
+    #         hebdomadaire, donc f7 est mort et le cap AA universel.
+    # True  : f7 reste MESURÉ pour un actif dont le prochain event S/A tombe
+    #         DANS la fenêtre couverte ; fail-closed conservé uniquement quand
+    #         le silence est invérifiable (aucun event couvert, ou devise hors
+    #         filtre producteur).
+    # MODIFIE LES CONVICTIONS ET LA SÉLECTION. Exige un A/B sur >= 20 sessions
+    # archivées avant activation en production. Ne pas activer avec ce patch.
     MACRO_COVERAGE_GRANULAR: bool = False
-    # alpha decay : tau de exp(-age/tau). Demi-vie réelle = tau×ln(2) ≈ 24 j.
-    DECAY_TIME_CONSTANT: int = 35
-    DECAY_FLOOR: float = 0.30        # un signal très vieux ne score jamais 0
+    # alpha decay (age_d1 -> score penalty)
+    # FIX-NAMING : la formule est exp(-age/tau), donc ce paramètre est un tau
+    # (constante de temps), PAS une demi-vie.
+    # Vraie demi-vie = tau × ln(2) = 35 × 0.6931 = 24.26 jours.
+    # Renommé DECAY_TIME_CONSTANT pour éviter toute confusion lors d'un recalibrage.
+    # Valeur inchangée : 35. Comportement numérique identique.
+    DECAY_TIME_CONSTANT: int = 35    # tau de exp(-age/tau) — demi-vie réelle = tau×ln(2) ≈ 24j
+    DECAY_FLOOR: float = 0.30        # plancher : un signal très vieux ne score jamais 0
     # contradictions
     C1_TRG_MIN: float = 0.5
     C1_RMG_MAX: float = 0.35
     C2_EXT_MAX: float = 0.3
     C2_HWA_MAX: float = 0.5
+    # C3_MACRO_MAX supprimé (v10.2.2) — alignement sur MACRO_CAP_RISK_THRESHOLD
+    # pour éviter la dérive entre le seuil du cap AA et celui du flag C3
+    # (les deux constantes valaient 0.50/0.5 par coïncidence, sans lien garanti).
     C4_DIST_ATR: float = 1.0
-    # P0-B — cohérence d'horizon (C7). [CALIBRATION REQUISE] ordre de
-    # grandeur, pas une mesure ; HORIZON_MARGIN absorbe l'imprécision.
+    # ── P0-B — cohérence d'horizon (C7) ─────────────────────────────────────
+    # [CALIBRATION REQUISE] Taux de réalisation d'ATR journalier NON calibré.
+    # Le nœud produit une alerte d'ordre de grandeur, pas une mesure.
+    # HORIZON_MARGIN absorbe l'imprécision : discrimine 3,7 j vs 2,0 j, pas
+    # 2,2 j vs 2,0 j.
     HORIZON_ATR_REALIZATION_RATE: float = 0.6
     HORIZON_MARGIN: float = 1.25
-    # P1-B — réconciliation de fraîcheur (C9)
+    # ── P1-B — réconciliation de fraîcheur (C9) ─────────────────────────────
     FRESHNESS_TOLERANCE_BARS: int = 1
     FRESHNESS_NEUTRAL: float = 0.5
-    # P1-C — régime macro portefeuille
+    # ── P1-C — régime macro portefeuille ────────────────────────────────────
     MACRO_REGIME_WINDOW_H: float = 48.0   # fenêtre GLISSANTE
     MACRO_REGIME_MIN_S: int = 3           # slots tier-S DISTINCTS
     MACRO_VACUUM_H: float = 120.0
-    # C10 — divergence RSI senior contre-tendance. [CALIBRATION REQUISE]
+    # ── C10 — divergence RSI senior contre-tendance (contradiction, pas cap) ─
+    # [CALIBRATION REQUISE] Seuil non calibré. Magnitude minimale
+    # (strength × confidence) d'une divergence senior pour être traitée comme
+    # contradiction structurelle. Discrimine 0.71 (AUD/JPY W1) de 0.10, pas
+    # 0.26 de 0.24.
     C10_DIV_SENIOR_TFS: tuple = ("W1", "D1")
     C10_DIV_MIN_EVIDENCE: float = 0.25
-    # P1-D
+    # ── P1-D ────────────────────────────────────────────────────────────────
     INVALIDATION_TIME_MULT: float = 1.5
-    # preflight
+    # preflight (ported from v9)
     RR_MIN: float = 1.5
     RR_MAX: float = 20.0
     SL_FLOOR_MULT: float = 0.8
@@ -819,11 +910,11 @@ class V4Config:
     LIMIT_ZONE_MAX_DIST: float = 2.0
     TP1_ATR_MULT: float = 2.0
     TP2_ATR_MULT: float = 1.0
-    TP_MAX_ATR_MULT: float = 4.0       # zone SR utilisée comme TP ≤ 4×ATR
+    TP_MAX_ATR_MULT: float = 4.0       # Garde: zone SR utilisée comme TP doit être ≤ 4×ATR
     # selection
     MAX_SETUPS: int = 5
     MAX_EXPOSURE_PER_CCY: int = 2
-    MIN_CONVICTION: str = "BB"       # conviction minimum post-decay en sélection
+    MIN_CONVICTION: str = "BB"       # conviction minimum post-decay pour entrer en sélection
 
     @classmethod
     def from_dict(cls, d: dict) -> "V4Config":
@@ -861,14 +952,15 @@ _XCTX_BB = MappingProxyType({"squeeze": 1.0, "normal": 0.6, "expansion": 0.3, ""
 _EXT_STATUSES = ("extreme_overbought", "extreme_oversold", "overbought", "oversold")
 
 # RSI divergence — poids par timeframe (somme théorique max = 0.74).
-# Cap final à 0.40 sur le score F2.
+# Seules les divergences confirmées (div_confirmed=True) contraires à la
+# direction du trade entrent en compte. Cap final à 0.40 sur le score F2.
 _DIV_TF_WEIGHT: Mapping[str, float] = MappingProxyType(
     {"W1": 0.35, "D1": 0.20, "H4": 0.12, "H1": 0.05, "M15": 0.02}
 )
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — THEME DETECTION
+# SECTION 7 — THEME DETECTION  (extended from v9 with cohesion)
 # ════════════════════════════════════════════════════════════════════════════
 def detect_currency_themes(assets: Mapping[str, CanonicalAsset], cfg: V4Config = CONFIG) -> MarketThemes:
     votes: dict[str, list[str]] = defaultdict(list)
@@ -901,8 +993,15 @@ def detect_currency_themes(assets: Mapping[str, CanonicalAsset], cfg: V4Config =
 def classify_macro_regime(cal: Optional[CalendarSets], clock: "Clock",
                           cfg: V4Config = CONFIG) -> MacroRegime:
     """Régime calendaire au niveau PORTEFEUILLE. Déterministe : comptage seul.
-    Dédoublonnage par (devise, datetime) — FF publie plusieurs lignes pour un
-    même communiqué. Fenêtre GLISSANTE de MACRO_REGIME_WINDOW_H."""
+
+    Dédoublonnage par (devise, datetime) : Forex Factory publie plusieurs
+    lignes pour un même communiqué (CPI m/m + y/y + Trimmed Mean au même
+    horodatage). Un comptage brut ferait franchir le seuil de 3 par un seul
+    release australien.
+
+    Fenêtre GLISSANTE : le cluster FOMC(J+2)/BOE(J+2,8)/BOJ(J+3,5) ne tient pas
+    dans « les 48 h suivantes » mais bien dans une fenêtre de 48 h glissante.
+    """
     if cal is None:
         return MacroRegime.UNKNOWN
     now = clock.now_utc
@@ -953,9 +1052,18 @@ def _rsi_status(a: CanonicalAsset, tf: str) -> str:
 
 
 def _divergence_penalty(a: CanonicalAsset) -> float:
-    """Pénalité [0.0, 0.40] : divergences RSI confirmées CONTRAIRES au trade.
-    Seules les entrées div_confirmed=True comptent ; poids = strength ×
-    confidence, pondéré par TF. Capé à 0.40. 0.0 si MTF absent."""
+    """Retourne une pénalité [0.0, 0.40] représentant la pression des divergences RSI
+    confirmées contraires à la direction du trade.
+
+    Règles :
+    - Seules les entrées avec ``div_confirmed == True`` sont prises en compte.
+    - Seules les divergences *contraires* à la direction MTF pénalisent
+      (une divergence dans le sens du trade est neutre pour F2).
+    - Le poids est proportionnel à ``div_strength_score × div_confidence_score``
+      et pondéré par le timeframe (W1 > D1 > H4 > H1 > M15).
+    - Le résultat est capé à 0.40 pour ne jamais annuler le signal à lui seul.
+    - Si MTF absent ou aucune divergence confirmée contraire : retourne 0.0.
+    """
     if a.mtf is None:
         return 0.0
     direction = a.mtf.direction
@@ -967,6 +1075,7 @@ def _divergence_penalty(a: CanonicalAsset) -> float:
         if not d.get("div_confirmed"):
             continue
         div_dir = str(d.get("divergence") or "").lower()
+        # Divergence contraire = bearish sur trade bullish, ou bullish sur trade bearish
         is_contra = (
             (direction is Direction.BULLISH and div_dir == "bearish")
             or (direction is Direction.BEARISH and div_dir == "bullish")
@@ -993,8 +1102,9 @@ def _aligned_trigger(a: CanonicalAsset) -> Optional[StructureEventView]:
 
 def audit_freshness(ev: StructureEventView, now: Optional[datetime],
                     cfg: V4Config = CONFIG) -> tuple[FreshnessAudit, int]:
-    """P1-B. signal_time absent ou TF non supporté -> UNKNOWN, comportement
-    STRICTEMENT INCHANGÉ (mode silencieux sur feed sans le champ)."""
+    """P1-B. Contrat : signal_time absent ou TF non supporté -> UNKNOWN et
+    comportement STRICTEMENT INCHANGÉ (mode silencieux sur feed sans le champ).
+    """
     if now is None or ev.signal_time is None:
         return FreshnessAudit.UNKNOWN, -1
     bars = _elapsed_bars_fx(ev.signal_time, now, ev.timeframe)
@@ -1044,6 +1154,7 @@ def f2_rmg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     grad = fast - slow
     signed = grad if a.mtf.direction is Direction.BULLISH else -grad
     score = _clamp01(0.5 + 0.5 * math.tanh(signed / cfg.RMG_SCALE))
+    # Pénalité divergence : divergences confirmées contraires à la direction
     div_penalty = _divergence_penalty(a)
     score = _clamp01(score - div_penalty)
     detail = f"RMG fast={fast:.1f} slow={slow:.1f} grad={grad:.1f} signed={signed:.1f}"
@@ -1066,6 +1177,7 @@ def f3_ext(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
         is_ext = any(k in st for k in _EXT_STATUSES)
         if not is_ext:
             continue
+        # overheated in the direction of the trade = bad
         if direction is Direction.BULLISH and ("overbought" in st):
             ext_in_dir += 1
         elif direction is Direction.BEARISH and ("oversold" in st):
@@ -1076,8 +1188,16 @@ def f3_ext(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
 
 
 def _sr_structure_bonus(a: CanonicalAsset, cfg: V4Config) -> tuple[float, str]:
-    """Bonus SR [0.0, SR_BONUS_MAX] si une zone SR proche (≤ SR_DIST_MAX_PCT)
-    et de side compatible est confirmée sur plusieurs TF (composite W1/D1/H4)."""
+    """Bonus SR [0.0, SR_BONUS_MAX] si une zone SR proche est confirmée sur plusieurs TF.
+
+    Logique :
+    - Cherche dans a.zones la zone la plus proche du prix (distance_pct minimale)
+      dont le side est compatible avec la direction du trade.
+    - Si distance_pct > SR_DIST_MAX_PCT : pas de bonus (zone trop lointaine).
+    - Score composite = SR_W_W1 * has_weekly + SR_W_D1 * has_daily + SR_W_H4 * has_h4
+    - Bonus = composite × SR_BONUS_MAX (bonus maximal si W1+D1+H4 tous présents).
+    - Retourne (bonus, detail_str).
+    """
     if a.mtf is None or not a.zones:
         return 0.0, "SR: pas de zones"
 
@@ -1094,6 +1214,7 @@ def _sr_structure_bonus(a: CanonicalAsset, cfg: V4Config) -> tuple[float, str]:
     if not candidates:
         return 0.0, f"SR: aucune zone compatible <{cfg.SR_DIST_MAX_PCT}%"
 
+    # Zone la plus proche
     best = min(candidates, key=lambda z: z.distance_pct)
     composite = (
         cfg.SR_W_W1 * float(best.has_weekly)
@@ -1143,7 +1264,7 @@ def _norm_lookup(v: Any) -> str:
     return str(v or "").strip().lower()
 
 
-def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001
+def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     ev = _aligned_trigger(a)
     if ev is None:
         return ScoredFactor("f5_xctx", None, 0.5, True, "trigger absent (contexte neutre)")
@@ -1157,7 +1278,7 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001
+def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:  # noqa: ARG001  # pylint: disable=unused-argument
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -1168,7 +1289,8 @@ def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) ->
 
 def _parse_ff_value(s: Optional[str]) -> Optional[float]:
     """Parse les valeurs Forex Factory ('0.5%', '25.8K', '-0.1%') en float.
-    None si absent ou non numérique (ex: Rate Statement)."""
+    Retourne None si la valeur est absente ou non numérique (ex: Rate Statement).
+    """
     if not s or s in ("—", "", "N/A", "n/a"):
         return None
     try:
@@ -1183,34 +1305,43 @@ def _parse_ff_value(s: Optional[str]) -> Optional[float]:
 
 
 def _surprise_factor(ev: CalendarEvent) -> float:
-    """Facteur [0.0, 1.0] de magnitude de surprise pour un event passé.
-    1.0 = inline/non mesurable ; 0.0 = surprise majeure. Events sans chiffre
-    (Press Conference…) reçoivent 0.7."""
+    """Retourne un facteur [0.0, 1.0] représentant la magnitude de la surprise
+    pour un event passé. 1.0 = inline ou non mesurable (risque résiduel faible).
+    0.0 = surprise majeure (volatilité résiduelle élevée).
+
+    Utilisé dans f7_macro pour moduler le risque post-event.
+    Seuls les events avec actual ET forecast parseable sont scorés précisément ;
+    les autres (Press Conference, Rate Statement sans chiffre) reçoivent 0.7.
+    """
     actual = _parse_ff_value(ev.actual)
     forecast = _parse_ff_value(ev.forecast)
     if actual is None or forecast is None:
+        # Event qualitatif sans chiffre → risque modéré par défaut
         return 0.7
     if abs(forecast) < 1e-9:
         return 0.5
     deviation = abs(actual - forecast) / (abs(forecast) + 1e-9)
+    # deviation > 50% → surprise majeure → factor = 0.2
+    # deviation   0% → inline           → factor = 1.0
     return _clamp01(1.0 - min(deviation * 2.0, 0.8))
 
 
 def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
-    # cal absent OU flux tronqué (mode non granulaire) -> FAIL-CLOSED :
-    # risque NON écarté (score 0.0), pas risque nul.
+    # V4-09 FIX : cal peut être None (absent) OU have feed_horizon_truncated=True
+    # Dans les deux cas, FAIL-CLOSED: risque NON écarté (score 0.0).
     if cal is None or (not cfg.MACRO_COVERAGE_GRANULAR and cal.feed_horizon_truncated):
         return ScoredFactor("f7_macro", None, 0.0, True,
                             "calendrier absent ou tronqué — fail-closed (risque NON écarté, "
                             "pas risque nul)")
     sides = {a.base, (a.quote or "")}
+    # Blackout active -> score 0 (hard veto handled in preflight)
     if sides & cal.suspended_ccy:
         return ScoredFactor("f7_macro", 1.0, 0.0, False, "BLACKOUT actif")
     now = clock.now_utc
     horizon: list[CalendarEvent] = list(cal.blackout) + list(cal.proximity) + list(cal.watch)
 
-    # ── Chemin futur ────────────────────────────────────────────────────────
+    # ── Chemin futur (inchangé) ──────────────────────────────────────────────
     relevant_h: list[float] = []
     for ev in horizon:
         if ev.tier not in (EventTier.S, EventTier.A):
@@ -1244,8 +1375,9 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
         base_score = _clamp01(1.0 - base_risk)
         base_detail = f"MACRO event S/A dans {hours:.1f}h risk={base_risk:.2f} -> {base_score:.2f}"
 
-    # ── R3 — Risque résiduel post-event (events passés récents) ────────────
-    # Cap absolu 0.25 : jamais dominant, ne peut pas inverser un signal.
+    # ── R3 — Risque résiduel post-event (events passés récents) ─────────────
+    # Modulation uniquement si actual/forecast disponibles (champs R2).
+    # N'affecte jamais le score de plus de 0.25 — ne peut pas inverser un signal.
     residual_parts: list[str] = []
     residual_penalty = 0.0
     for ev in horizon:
@@ -1260,6 +1392,7 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
         if delta < -after:
             continue   # hors fenêtre post-event
         surprise = _surprise_factor(ev)
+        # decay exponentiel : plus l'event est récent, plus la pénalité est forte
         recency = math.exp(delta / max(after / 3.0, 1.0))   # delta < 0 → recency ∈ (0,1)
         penalty = recency * (1.0 - surprise)
         if penalty > 0.05:
@@ -1268,7 +1401,7 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
                 f"résidu {ev.currency} {ev.event_name[:18]} surprise={surprise:.2f}"
             )
 
-    residual_penalty = min(residual_penalty, 0.25)
+    residual_penalty = min(residual_penalty, 0.25)   # cap absolu : jamais dominant
     final_score = _clamp01(base_score - residual_penalty)
     detail_parts = [base_detail]
     if residual_parts:
@@ -1296,10 +1429,29 @@ def build_factor_vector(a: CanonicalAsset, themes: MarketThemes,
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 9 — SCORING (absolute) + CROSS-SECTION (tie-break/diversif ONLY)
 # ════════════════════════════════════════════════════════════════════════════
+def score_absolute(fv: FactorVector) -> float:
+    return fv.absolute_mean
+
+
 def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
-    """Multiplicateur [DECAY_FLOOR, 1.0] : max(DECAY_FLOOR, exp(-age/tau)).
-    tau = DECAY_TIME_CONSTANT = 35 → demi-vie réelle ≈ 24,3 j.
-    age=0j -> 1.000 · age=24j -> ≈0.505 · age=35j -> ≈0.368 · age=50j -> floor 0.30."""
+    """Multiplicateur exponentiel [DECAY_FLOOR, 1.0] en fonction de l'âge du signal.
+
+    Formule : decay = max(DECAY_FLOOR, exp(-age / DECAY_TIME_CONSTANT))
+
+    DECAY_TIME_CONSTANT est le tau de la décroissance exponentielle, PAS la demi-vie.
+    Vraie demi-vie = tau × ln(2) = 35 × 0.6931 ≈ 24.3 jours.
+
+    Valeurs de référence (tau=35, floor=0.30) :
+    - age=0j   -> decay=1.000 (signal du jour)
+    - age=24j  -> decay≈0.505 (environ la moitié — vraie demi-vie)
+    - age=35j  -> decay≈0.368 (1/e, pas 0.5 — erreur dans l'ancienne doc)
+    - age=50j  -> decay≈0.239 → plafonné à DECAY_FLOOR=0.300
+    - age=∞    -> decay=DECAY_FLOOR (plancher, jamais 0)
+
+    Le floor évite d'éjecter automatiquement un signal structurellement
+    solide mais âgé — la conviction finale reste influencée par les flags
+    et caps, pas seulement par le decay.
+    """
     if age_d1 <= 0:
         return 1.0
     raw = math.exp(-age_d1 / cfg.DECAY_TIME_CONSTANT)
@@ -1307,10 +1459,14 @@ def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
 
 
 def resolve_unknown_decay(known_ages: list[int], cfg: V4Config) -> tuple[float, str]:
-    """P1-A — decay quand age_d1 est None : médiane empirique du decay de
-    l'univers du run (déterministe, aucune constante en dur). Repli sur
-    DECAY_FLOOR si l'univers ne fournit aucune référence. Évite d'attribuer
-    le bonus de fraîcheur maximal à une absence d'information."""
+    """P1-A — decay applicable quand age_d1 est None.
+
+    Le comportement historique (`age_d1 or 0` -> decay 1.0) attribuait le bonus
+    de fraîcheur MAXIMAL à une absence d'information, contredisant la règle
+    « UNKNOWN > interprétation optimiste ». Substitut : médiane empirique du
+    decay de l'univers du run — déterministe, reproductible, aucune constante
+    en dur. Repli sur DECAY_FLOOR si l'univers ne fournit aucune référence.
+    """
     if known_ages:
         return _median([_alpha_decay_factor(a, cfg) for a in known_ages]), "universe_median"
     return cfg.DECAY_FLOOR, "floor_no_reference"
@@ -1327,14 +1483,15 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     for sym, m in means:
         below = sum(1 for x in values if x < m)
         equal = sum(1 for x in values if x == m)
+        # mid-rank percentile, deterministic
         out[sym] = (below + 0.5 * equal) / n if n else 0.0
     return out
 
 
-def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001
+def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:  # noqa: ARG001  # pylint: disable=unused-argument
     """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
-    Quantile NEVER influences conviction; only ordering here. Symbol = clé
-    stable finale pour reproductibilité bit-pour-bit."""
+    Quantile NEVER influences conviction; only ordering here. Symbol is the
+    final stable secondary key for bit-for-bit reproducibility."""
     def key(s: SetupV4):
         fs = s.factor_scores
         return (
@@ -1384,7 +1541,7 @@ def _next_macro_event_days(a: CanonicalAsset, cal: Optional[CalendarSets],
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 10 — CONTRADICTIONS C1..C11
+# SECTION 10 — CONTRADICTIONS C1..C5
 # ════════════════════════════════════════════════════════════════════════════
 def _c1_struct_vs_momentum(fv: FactorVector, cfg: V4Config) -> Optional[Flag]:
     if fv.get("f4_trg") > cfg.C1_TRG_MIN and fv.get("f2_rmg") < cfg.C1_RMG_MAX:
@@ -1409,7 +1566,8 @@ def _c3_trend_vs_calendar(a: CanonicalAsset, fv: FactorVector,
     if cal is None:
         return None
     sides = {a.base, (a.quote or "")}
-    # Scope S+A : exactement les mêmes events qui font baisser f7_macro.
+    # v10.2.2 : scope élargi à S+A (était S uniquement) pour couvrir exactement
+    # les mêmes events que ceux qui font baisser f7_macro / déclenchent le cap AA.
     tier_sa = [e for e in (list(cal.blackout) + list(cal.proximity))
                if e.tier in (EventTier.S, EventTier.A) and e.currency in sides]
     if tier_sa:
@@ -1441,7 +1599,13 @@ def _c5_trade_vs_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config) -
 
 
 def _c6_structural_escalation(a: CanonicalAsset) -> Optional[Flag]:
-    """C6 — escalade structurelle counter-MTF multi-TF (market_context)."""
+    """C6 — v3.5.0 Phase 3.
+
+    Triggered when market_context reports an ascending counter-trend CHoCH
+    sequence across timeframe seniority levels (e.g. H1 → H4 → D1 bearish
+    in a bullish MTF asset). Severity: major.
+    Returns None when market_context absent or escalation_detected is False.
+    """
     evs = (a.market_context or {}).get("structure_events_summary") or {}
     if not evs.get("escalation_detected"):
         return None
@@ -1466,7 +1630,7 @@ def _c7_horizon_coherence(horizon: Optional[tuple], cfg: V4Config) -> Optional[F
 
 
 def _c8_age_unknown(a: CanonicalAsset) -> Optional[Flag]:
-    """P1-A — âge de structure inconnu : decay sans mesure."""
+    """P1-A — âge de structure inconnu : le decay ne repose sur aucune mesure."""
     if a.mtf is not None and a.mtf.age_d1 is None:
         return Flag("C8", "minor",
                     "Âge de structure inconnu — decay substitué par la médiane de l'univers")
@@ -1488,11 +1652,31 @@ def _c9_freshness_mismatch(a: CanonicalAsset, now: Optional[datetime],
 
 
 def _c11_stale_price_market_entry(a: CanonicalAsset, entry_type: str) -> Optional[Flag]:
-    """V4-01 — entrée "Market" (seul cas où compute_entry utilise
-    a.current_price TEL QUEL) construite sur un prix marqué périmé par la
-    couche de fusion amont -> flag major (défaut d'intégrité de donnée).
-    Zéro régression : rien n'est émis si current_price_source est absent,
-    "live", ou si l'entrée est "Limit"."""
+    """V4-01 FIX (round de validation zero-régression, 02/08/2026, gate G5).
+
+    Le champ ``current_price_source`` a été déclaré explicitement sur
+    ``CanonicalAsset`` par le correctif V4-01 (ci-dessus) pour cesser d'être
+    silencieusement supprimé par ``extra="ignore"`` -- mais aucune fonction
+    ne le consultait ensuite : l'audit indépendant relevait que ce correctif
+    "retient la donnée mais ne la qualifie ni ne la rend" (rapport RUN-4,
+    §7 V4-01, gate G5 : "gate ou qualification explicite si `stale` sur un
+    setup publié").
+
+    Cette fonction ferme cette lacune par le mécanisme déjà éprouvé des
+    flags C1-C10 : quand l'entrée calculée est de type "Market" (le seul cas
+    où `compute_entry` utilise `a.current_price` TEL QUEL comme niveau
+    d'entrée -- une entrée "Limit" utilise un niveau de zone S/R, donc n'est
+    pas concernée) ET que la couche de fusion amont a explicitement marqué
+    ce prix comme périmé, un flag "major" est émis. Sévérité alignée sur les
+    autres flags d'intégrité de donnée réels (C3, C6) qui pèsent déjà sur
+    `k` dans `grade()` : un prix officiellement périmé utilisé tel quel
+    comme niveau d'entrée est un défaut d'intégrité de donnée, pas un simple
+    avertissement cosmétique.
+
+    Zéro régression : aucun flag n'est émis pour un actif dont
+    `current_price_source` est absent, "live", ou toute valeur autre que
+    "stale" (comportement inchangé), ni pour une entrée "Limit" (jamais
+    concernée par ce prédicat)."""
     if entry_type != "Market":
         return None
     if (a.current_price_source or "").lower() != "stale":
@@ -1504,8 +1688,13 @@ def _c11_stale_price_market_entry(a: CanonicalAsset, entry_type: str) -> Optiona
 
 def _c10_htf_divergence(a: CanonicalAsset, cfg: V4Config = CONFIG) -> Optional[Flag]:
     """Divergence RSI confirmée, CONTRAIRE au trade, sur TF senior (W1/D1).
-    Source de vérité = a.rsi_by_tf (identique à _divergence_penalty), PAS
-    market_context. None si MTF absent/Neutral -> UNKNOWN, pas de flag inventé."""
+
+    Source de vérité = a.rsi_by_tf, identique à _divergence_penalty (F2).
+    PAS market_context.momentum_context : ce résumé dérivé ne transporte ni
+    div_strength_score ni div_confidence_score, et vaut None si le merge
+    engine a crashé — dégradation OUVERTE, contraire à la doctrine P0-A.
+    Retourne None si MTF absent ou Neutral -> UNKNOWN, pas de flag inventé.
+    """
     if a.mtf is None or a.mtf.direction is Direction.NEUTRAL:
         return None
     contra = _opposite_dir(a.mtf.direction)
@@ -1539,11 +1728,11 @@ def detect_contradictions(a: CanonicalAsset, fv: FactorVector, themes: MarketThe
         _c3_trend_vs_calendar(a, fv, cal, cfg),
         _c4_quality_vs_potential(a, cfg),
         _c5_trade_vs_theme(a, themes, cfg),
-        _c6_structural_escalation(a),
+        _c6_structural_escalation(a),       # v3.5.0 Phase 3
         _c7_horizon_coherence(horizon, cfg),
         _c8_age_unknown(a),
         _c9_freshness_mismatch(a, now, cfg),
-        _c10_htf_divergence(a, cfg),
+        _c10_htf_divergence(a, cfg),        # ← ajout (comité de validation)
     ):
         if f is not None:
             flags.append(f)
@@ -1559,8 +1748,10 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
                ) -> tuple[Optional[Conviction], Optional[str]]:
     """Returns the most restrictive cap and a human reason, or (None, None)."""
     caps: list[tuple[Conviction, str]] = []
-    # Deux causes distinctes de cap BBB : conviction_cap=BBB (configuration)
-    # et atr_source=synthetic.
+    # Synthetic ATR -> BBB (from JSON conviction_cap or atr_source)
+    # V4-02 FIX : distinguer les deux causes distinctes qui génèrent BBB
+    # 1. conviction_cap = "BBB" sur 33 actifs (configuration) — message vrai sur 32/33
+    # 2. atr_source = "synthetic" sur 1 actif (DE30/EUR) — message vrai sur 1/33
     if (a.conviction_cap or "").upper() == "BBB":
         caps.append((Conviction.BBB, "conviction_cap=BBB"))
     if (a.atr_source or "").lower() == "synthetic":
@@ -1574,10 +1765,14 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
                          "insuffisante) — cap prudentiel"))
         else:
             caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
+    # v3.5.0 Phase 2: structural_risk Critical -> BBB cap.
+    # REVERSAL_RISK state requires 3 concurrent factors (D1 counter + HTF div + mature
+    # OR full escalation OR W1+ counter). Capping at BBB signals structural uncertainty
+    # without blocking the setup. min() below ensures the most restrictive cap wins.
     if (a.market_context or {}).get("structural_risk") == "Critical":
         caps.append((Conviction.BBB, "risque structurel critique (REVERSAL_RISK)"))
     # P0-B — cap, PAS veto : la thèse peut rester valide avec une cible
-    # intermédiaire redéfinie (décision d'opérateur, pas de moteur).
+    # intermédiaire redéfinie. C'est une décision d'opérateur, pas de moteur.
     if flags and any(f.code == "C7" for f in flags):
         caps.append((Conviction.BB, "horizon incohérent avec le calendrier (C7)"))
     # P1-C — régime portefeuille, aucun multiplicateur de score.
@@ -1595,10 +1790,38 @@ def grade(absolute_mean: float, flags: list[Flag], cap: Optional[Conviction],
           cfg: V4Config = CONFIG) -> Conviction:
     """Map absolute score x contradictions to AAA..B. Caps applied last.
 
-    `base` est dérivé UNIQUEMENT de `absolute_mean` et `k`, sans jamais
-    consulter `cap` pour le faire remonter (V4-02 : l'ancienne garde
-    transformait un cap BBB restrictif en PLANCHER). Un cap ne peut que
-    faire DESCENDRE base, jamais le contraire."""
+    V4-02 FIX (round de validation zero-régression, 02/08/2026, gate G3,
+    CRITIQUE). L'ancienne garde `cap_is_restrictive_floor` avait pour
+    intention documentée de protéger contre un cap NON restrictif (ex. AA
+    du régime P1-C, portefeuille entier) agissant comme un laissez-passer
+    vers BBB. Mais son implémentation produisait l'effet strictement
+    inverse pour tout cap RÉELLEMENT restrictif (BBB, le cas de
+    `conviction_cap` présent sur la quasi-totalité de l'univers desk ce
+    cycle) : `(m >= BBB_MIN or cap_is_restrictive_floor) and k <= 2`
+    forçait `base = BBB` dès que `k <= 2`, quelle que soit la faiblesse de
+    `m` — un plafond de conviction agissant comme PLANCHER, précisément le
+    défaut que la garde prétendait corriger, mais pour le cap le plus
+    fréquent du système plutôt que pour le cas rare qu'elle ciblait.
+    Conséquence matérielle démontrée par l'audit indépendant (rapport
+    RUN-4, V4-02) : un score décayé strictement sous le seuil BB, combiné à
+    `conviction_cap=BBB` et k<=2, ressortait en BBB (donc publié en WATCH
+    par le Comité) au lieu de B/BB (donc rejeté en LOW_CONVICTION).
+
+    Correction : `base` est dérivé UNIQUEMENT de `absolute_mean` et `k`,
+    sans jamais consulter `cap` pour le faire remonter. Le rôle de `cap`
+    reste exactement celui déjà correctement implémenté juste après cette
+    dérivation : un plafond qui ne peut que faire DESCENDRE `base` (`if cap
+    plus restrictif que base: base = cap`), jamais le faire monter — c'est
+    la seule interprétation cohérente avec le nom même du mécanisme
+    ("cap" = plafond) et avec le NOTE d'origine ("un cap ne doit jamais
+    servir de laissez-passer").
+
+    Zéro régression : pour tout setup où `cap is None`, ou où `m`/`k`
+    atteignent déjà naturellement le palier BBB sans l'aide du cap, le
+    résultat est strictement identique à avant ce correctif. Seuls les
+    setups qui étaient artificiellement promus en BBB par un cap restrictif
+    malgré un `m` insuffisant redescendent désormais à BB/B, comme
+    l'exigeait le gate G3."""
     minors = sum(1 for f in flags if f.severity == "minor")
     majors = sum(1 for f in flags if f.severity == "major")
     k = minors + 2 * majors
@@ -1622,7 +1845,7 @@ def grade(absolute_mean: float, flags: list[Flag], cap: Optional[Conviction],
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 12 — LEVELS + preflight
+# SECTION 12 — LEVELS  (ported from v9 §8, logic unchanged) + preflight
 # ════════════════════════════════════════════════════════════════════════════
 def _is_opposite(zone: ZoneView, direction: Direction) -> bool:
     side = (zone.side or "").upper()
@@ -1648,7 +1871,7 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
-def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001
+def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: float,  # noqa: ARG001  # pylint: disable=unused-argument
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
     if ev and ev.candles_elapsed <= 1 and (ev.distance_atr_multiple or 999) <= cfg.FRESH_ATR_MAX:
@@ -1656,7 +1879,10 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: floa
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
-        # La zone doit être devant le prix, pas derrière (pull-back attendu).
+        # FIX-PRICE-PAST-TP: la zone doit être devant le prix, pas derrière
+        # Bullish : on attend un pull-back -> zone SOUS le prix courant ✓
+        # Bearish : on attend un pull-back -> zone AU-DESSUS du prix courant ✓
+        # Si le prix a déjà dépassé la zone dans le sens du trade, elle est invalide
         zone_valid = (
             (direction is Direction.BULLISH and z.level < price) or
             (direction is Direction.BEARISH and z.level > price)
@@ -1665,6 +1891,7 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView], atr: floa
             return z.level, "Limit"
     if a.hot_zone_primary:
         hz = a.hot_zone_primary
+        # FIX-PRICE-PAST-TP: même garde sur hot_zone_primary
         hz_valid = (
             (direction is Direction.BULLISH and hz.level < price) or
             (direction is Direction.BEARISH and hz.level > price)
@@ -1689,8 +1916,9 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
     detail = f"Raw SL={sl_raw:.5f} ({bb_regime} ×{bb_mult})"
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
-        # P2-B — borne : sans elle, une zone mal placée produit un SL très
-        # large avec un RR formellement acceptable.
+        # P2-B — sans borne, une zone mal placée à LIMIT_ZONE_MAX_DIST produit
+        # un SL très large avec un RR formellement acceptable parce que le TP
+        # s'éloigne symétriquement.
         max_dist = cfg.SL_MAX_ATR_MULT * atr if atr > 0 else float("inf")
         if direction is Direction.BULLISH:
             cand = z.level - 0.3 * atr
@@ -1730,7 +1958,7 @@ def compute_tp1(a: CanonicalAsset, entry: float, atr: float,
         if dist_atr <= cfg.TP_MAX_ATR_MULT:
             # Zone opposée proche et réaliste → l'utiliser comme TP1
             return opp.level, round(dist_atr, 2), False
-        # Zone trop loin → réservée à TP2, TP1 synthétique
+        # Zone opposée trop loin → la réserver pour TP2, utiliser synthétique pour TP1
     tp1 = entry + cfg.TP1_ATR_MULT * atr if direction is Direction.BULLISH else entry - cfg.TP1_ATR_MULT * atr
     return tp1, cfg.TP1_ATR_MULT, True
 
@@ -1740,10 +1968,13 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = [z for z in sorted(a.zones, key=lambda z: z.distance_pct)
            if _is_opposite(z, direction)]
+    # Chercher une zone opposée lointaine (> TP_MAX_ATR_MULT) pour TP2
     for z in opp:
         dist_atr = abs(z.level - entry) / atr if atr > 0 else float("inf")
         if dist_atr > cfg.TP_MAX_ATR_MULT:
+            # Zone lointaine = objectif long terme, utiliser comme TP2
             return z.level, round(dist_atr, 2), False
+    # Pas de zone lointaine → TP2 synthétique conservateur
     tp2 = tp1 + cfg.TP2_ATR_MULT * atr if direction is Direction.BULLISH else tp1 - cfg.TP2_ATR_MULT * atr
     return tp2, (round(abs(tp2 - entry) / atr, 2) if atr > 0 else None), True
 
@@ -1800,7 +2031,8 @@ def build_levels(a: CanonicalAsset, cfg: V4Config = CONFIG) -> LevelBundle:
     tp1, tp1_mult, tp1_syn = compute_tp1(a, entry, atr, cfg)
     tp2, tp2_mult, tp2_syn = compute_tp2(a, entry, tp1, atr, cfg)
     rr, rr_detail = compute_rr(entry, sl, tp1, tp2, tp1_syn, tp2_syn)
-    # P2-C — divulgation : RR si exécution au marché courant plutôt qu'à la limite.
+    # P2-C — divulgation : dégradation du RR si exécution au marché courant
+    # plutôt qu'au niveau limite visé. Information seulement.
     rr_if_market: Optional[float] = None
     price = a.current_price or 0.0
     if entry_type == "Limit" and price > 0:
@@ -1838,7 +2070,8 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "SL_SIGN"
         setup.reject_detail = "SL ≤ entry (bearish)"
         return setup
-    # Rejeter si le prix courant a déjà atteint/dépassé TP1 (zone Limit stale).
+    # FIX-PRICE-PAST-TP: rejeter si le prix courant a déjà atteint ou dépassé TP1
+    # (cas zone Limit stale : entry calculée sur une zone que le marché a déjà franchie)
     if setup.current_price > 0 and setup.atr_effective > 0:
         atr_overshoot = abs(setup.current_price - setup.entry) / setup.atr_effective
         if setup.direction is Direction.BULLISH and setup.current_price >= setup.tp1:
@@ -1855,7 +2088,7 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
                 f"(entry dépassée de +{atr_overshoot:.2f}×ATR)"
             )
             return setup
-    # Conviction minimum post-decay.
+    # Conviction minimum post-decay : élimine les signaux trop dégradés pour être actionnables
     min_ord = _CONVICTION_ORDINAL.get(cfg.MIN_CONVICTION, 0)
     setup_ord = _CONVICTION_ORDINAL.get(setup.conviction.value, 0)
     if setup_ord < min_ord:
@@ -1871,7 +2104,7 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 13 — DIVERSIFY  (cluster -> representative -> caps -> top N)
+# SECTION 13 — DIVERSIFY  (cluster by risk -> representative -> cap -> top N)
 # ════════════════════════════════════════════════════════════════════════════
 def _split_symbol(symbol: str) -> tuple[str, str]:
     if "/" in symbol:
@@ -1887,6 +2120,7 @@ def assign_clusters(setups: list[SetupV4], themes: MarketThemes) -> dict[str, st
         d = s.direction.value
         inv = "Bearish" if d == "Bullish" else "Bullish"
         key = None
+        # dominant currency theme drives the cluster
         if base in themes.strong and themes.strong[base] == d:
             key = f"{base}_{'strong' if d == 'Bullish' else 'weak'}"
         elif quote and quote in themes.strong and themes.strong[quote] == inv:
@@ -1916,6 +2150,7 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
     if not setups:
         return []
     assign_clusters(setups, themes)
+    # group by cluster, keep best absolute_mean as representative
     groups: dict[str, list[SetupV4]] = defaultdict(list)
     for s in setups:
         groups[s.cluster].append(s)
@@ -1931,6 +2166,7 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
         for loser in members_sorted[1:]:
             loser.reject_code = "CLUSTER_DUP"
             loser.reject_detail = f"Représentant cluster {key} = {rep.symbol}"
+    # rank representatives, then apply per-currency exposure cap, then top-N
     ranked = sorted(
         representatives,
         key=lambda x: (-_CONVICTION_ORDINAL[x.conviction.value],
@@ -1941,10 +2177,20 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
     kept: list[SetupV4] = []
     kept_meta: list[tuple[str, str, str, set[str], Direction]] = []
 
-    # reached_max : les représentants au-delà de MAX_SETUPS reçoivent un
-    # vrai reject_code (MAX_SETUPS_REACHED) au lieu de tomber sur le
-    # defaulting "CLUSTER_DUP" de _eliminated_from_setups(). DÉPLOIEMENT
-    # ATOMIQUE avec les routes correspondantes dans selection_grid.py.
+    # PATCH-CLUSTERDUP (round du 31/07/2026) : reached_max remplace le
+    # `break` sec précédent. AVANT : dès que len(kept)>=MAX_SETUPS, `break`
+    # sortait de la boucle et tous les représentants restants n'obtenaient
+    # NI reject_code NI capped_reason -- ils tombaient dans le defaulting
+    # "or CLUSTER_DUP" de _eliminated_from_setups(), un jugement faux (ce
+    # n'est ni un doublon de cluster, ni une exposition/corrélation
+    # excessive, juste "après la limite"). Vérifié par exécution (scénario
+    # à 7 setups synthétiques, round du 31/07/2026) : `kept` final identique
+    # avant/après (même contenu, même ordre) -- seul l'étiquetage des
+    # exclusions change. DÉPLOIEMENT ATOMIQUE OBLIGATOIRE avec l'ajout des
+    # routes EXPOSURE_CAP/CORRELATION_CAP/MAX_SETUPS_REACHED dans
+    # selection_grid.py (bluestar.decide) -- sans ça, ces codes tombent sur
+    # le repli (REJECT, "reject_code_inconnu") côté comité, une régression
+    # de sévérité pire que le bug d'origine.
     reached_max = False
     for s in ranked:
         if reached_max:
@@ -1963,8 +2209,10 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
             s.cal_note = (s.cal_note + " [capped: exposition devise]").strip()
             continue
 
-        # P2-A — cap corrélation UNIQUEMENT entre paires SANS devise commune
-        # (celles avec devise commune sont déjà gouvernées par MAX_EXPOSURE_PER_CCY).
+        # P2-A — cap corrélation appliqué UNIQUEMENT aux paires SANS devise
+        # commune. Les paires partageant une devise sont déjà gouvernées par
+        # MAX_EXPOSURE_PER_CCY ci-dessus ; y ajouter « un seul par groupe »
+        # durcirait silencieusement le seuil de 2 à 1 — régression non demandée.
         s_groups = corr_idx.get(s.symbol, set())
         corr_hit: Optional[str] = None
         if s_groups:
@@ -1994,12 +2242,13 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 14 — PIPELINE
+# SECTION 14 — PIPELINE  (linear orchestration, V4)
 # ════════════════════════════════════════════════════════════════════════════
 def _build_universe(assets: Mapping[str, CanonicalAsset], cal: CalendarSets,
                     cfg: V4Config) -> Universe:
-    # R5 — audit des devises sans couverture calendaire : un silence sur
-    # JPY/AUD/NZD/CHF n'est pas une absence de risque.
+    # R5 — Audit des devises sans couverture calendaire.
+    # Un silence sur JPY/AUD/NZD/CHF n'est pas une absence de risque :
+    # le feed FF JSON peut ne pas couvrir ces devises cette semaine.
     all_ccy: set[str] = set()
     for a in assets.values():
         all_ccy.add(a.base)
@@ -2109,6 +2358,7 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
         tb = themes.bonus_for(a.base, a.quote, a.mtf.direction)
         if tb > 0.6:
             parts.append(f"thème favorable ({tb:.2f})")
+    # v3.5.0 Phase 4: market_context enrichment (read-only, no scoring impact).
     ctx = a.market_context or {}
     market_state = ctx.get("market_state")
     if market_state and market_state not in ("DATA_INCOMPLETE", "RANGE_COMPRESSION"):
@@ -2122,14 +2372,21 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
 
 
 def _best_choch_info(a: CanonicalAsset) -> Optional[str]:
-    """Label court du meilleur CHoCH Fresh (aligné d'abord, puis score desc).
-    Format "<TF> <Dir> <Score> (<candles>c)", suffixe ⚠contra si contraire
-    à la direction du trade. None si aucun CHoCH Fresh."""
+    """Retourne un label court pour le meilleur CHoCH disponible sur l'asset,
+    qu'il soit aligné avec la direction du trade ou non.
+
+    Format : "<TF> <Dir> <Score> (<candles>c)"
+    Ex : "H4 Bearish 85 (3c)"  ou  "D1 Bullish 65 (2c) ⚠contra"
+
+    ⚠contra est ajouté si la direction du CHoCH est contraire à la direction du trade.
+    Retourne None si aucun CHoCH Fresh présent.
+    """
     if not a.structure_events:
         return None
     fresh = [ev for ev in a.structure_events if ev.status.lower() == "fresh"]
     if not fresh:
         return None
+    # Trier : aligné d'abord, puis par confluence_score desc
     trade_dir = a.mtf.direction if a.mtf else None
     def _sort_key(ev: StructureEventView) -> tuple:
         aligned = int(_dir_eq(ev.direction, trade_dir)) if trade_dir else 0
@@ -2160,7 +2417,8 @@ def _invalidation_structure(a: CanonicalAsset, cfg: V4Config) -> str:
 
 def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
                                  cfg: V4Config) -> dict[str, str]:
-    """P1-D — sortie pure : toutes les composantes sont déjà calculées ailleurs."""
+    """P1-D — sortie pure. Toutes les composantes sont déjà calculées ailleurs ;
+    aucune valeur nouvelle n'est estimée."""
     if clock is None:
         return {}
     if horizon_days is not None and horizon_days > 0:
@@ -2178,7 +2436,7 @@ def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
     }
 
 
-def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001
+def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # noqa: ARG001  # pylint: disable=unused-argument
                 cal: Optional[CalendarSets], cfg: V4Config,
                 lv: Optional[LevelBundle] = None,
                 clock: Optional[Clock] = None) -> SetupV4:
@@ -2223,7 +2481,10 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         htf_aligned=_htf_aligned(a),
         sl_detail=lv.sl_detail, rr_detail=lv.rr_detail,
         factor_scores=fs,
+        # FIX-PRICE-PAST-TP: snapshot du prix courant pour validation dans preflight
         current_price=(a.current_price or 0.0),
+        # PATCH-ASSETCLASS : propage la classification déjà connue de a (JSON
+        # merge), plutôt que de la laisser au défaut "forex" silencieux.
         asset_class=a.asset_class,
         age_d1=age_val, age_known=age_known,
         rr_if_market=lv.rr_if_market,
@@ -2232,6 +2493,7 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,  # no
         horizon_event_days=(round(ev_days, 2) if ev_days is not None else None),
         invalidation=_build_invalidation_contract(a, lv, cal, clock, h_days, ev_label, cfg),
     )
+
 
 
 def _pipeline_factors_and_grades(
@@ -2252,11 +2514,12 @@ def _pipeline_factors_and_grades(
         lv = build_levels(a, config)
         lv_cache[a.symbol] = lv
         drafts.append(_make_draft(a, fv, themes, cal_sets, config, lv, clock))
-    # Quantiles cross-section sur absolute_mean BRUT (rang relatif, le decay
-    # ne doit pas biaiser l'ordre d'urgence intra-univers).
+    # cross-section quantiles (calculés sur absolute_mean brut — cross-section est un rang relatif,
+    # le decay ne doit pas biaiser l'ordre d'urgence intra-univers)
     quantiles = compute_quantiles(vectors)
     for s in drafts:
         s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
+    # alpha decay + contradictions + grade
     asset_by_sym = {a.symbol: a for a in universe.passed}
     fv_by_sym = {v.symbol: v for v in vectors}
     known_ages = [s.age_d1 for s in drafts if s.age_known]
@@ -2268,11 +2531,12 @@ def _pipeline_factors_and_grades(
     for s in drafts:
         a = asset_by_sym[s.symbol]
         fv = fv_by_sym[s.symbol]
+        # — alpha decay : age_d1 vient du setup (déjà extrait de mtf) —
         if s.age_known:
             decay, decay_src = _alpha_decay_factor(s.age_d1, config), "age"
         else:
             decay, decay_src = unknown_decay, unknown_src
-        raw_mean = s.factor_scores.absolute_mean
+        raw_mean = s.factor_scores.absolute_mean        # pré-decay (pour audit)
         decayed_mean = _clamp01(raw_mean * decay)
         s.factor_scores.absolute_mean_raw = round(raw_mean, 4)
         s.factor_scores.decay_factor = round(decay, 4)
@@ -2281,8 +2545,10 @@ def _pipeline_factors_and_grades(
         flags = detect_contradictions(a, fv, themes, cal_sets, config,
                                       now=clock.now_utc,
                                       horizon=(s.horizon_days, s.horizon_event_days, s.horizon_event))
-        # C11 câblé ici : le prédicat a besoin de s.entry_type (connu depuis
-        # _make_draft, pas encore disponible dans detect_contradictions).
+        # V4-01/G5 FIX : câblé ici plutôt que dans detect_contradictions() car
+        # ce prédicat a besoin de s.entry_type (connu depuis _make_draft, pas
+        # encore disponible au point d'appel de detect_contradictions). Simple
+        # append : n'altère aucune des logiques C1-C10 existantes.
         stale_flag = _c11_stale_price_market_entry(a, s.entry_type)
         if stale_flag is not None:
             flags.append(stale_flag)
@@ -2318,7 +2584,9 @@ def _pipeline_collect_eliminated(
     final: list[SetupV4],
     cal: Optional[CalendarSets] = None,
 ) -> list[Eliminated]:
-    """Etape 11 : collecte des actifs éliminés (gates + preflight + non-représentants)."""
+    """Etape 11 : collecte des assets elimines (gates + preflight + non-representants)."""
+    # Patch comité 03/08/2026 (pt.3) : cal transmis pour renseigner le vrai
+    # cal_status des rejets d'univers (cf. _collect_eliminated).
     eliminated = _collect_eliminated(universe, cal)
     eliminated.extend(_eliminated_from_setups(preflight_rejects))
     final_syms = {s.symbol for s in final}
@@ -2326,9 +2594,9 @@ def _pipeline_collect_eliminated(
     eliminated.extend(_eliminated_from_setups(non_reps))
     return eliminated
 
-
 def run_pipeline(
     merged_path: str,
+    calendar_path: Optional[str] = None,
     calendar_json_path: Optional[str] = None,
     output_path: Optional[str] = None,
     pdf_path: Optional[str] = None,
@@ -2336,9 +2604,13 @@ def run_pipeline(
 ) -> str:
     # 1 — ingestion
     meta, assets, correlation_groups = load_merged(merged_path)
+    if calendar_path and not calendar_json_path:
+        raise NotImplementedError(
+            "HTML calendar parsing is delegated upstream; pass --calendar-json.")
     calendar_data = load_calendar(calendar_json_path, desk_generated_at=meta.generated_at)
     clock = Clock.from_meta(meta.generated_at)
 
+    # Auto-nommage si pas de chemin explicite
     if output_path is None:
         output_path = report_filename(meta.generated_at, "html")
     if pdf_path is None:
@@ -2374,6 +2646,7 @@ def run_pipeline(
                          correlation_groups=correlation_groups,
                          macro_regime=regime,
                          cal_time_degraded=calendar_data.time_degraded,
+                         cal_time_offset=calendar_data.time_offset_hours,
                          cal_time_detail=calendar_data.time_audit_detail,
                          cal_feed_truncated=calendar_data.feed_horizon_truncated,
                          cal_feed_detail=calendar_data.feed_coverage_detail,
@@ -2388,17 +2661,24 @@ def run_pipeline(
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
-    # 12b — render (PDF natif) — optionnel, jamais bloquant. fallback_html
-    # explicite : sans lui, render_pdf ne produirait rien si WeasyPrint absent.
+    # 12b — render (PDF natif calibré) — optionnel, jamais bloquant
     if pdf_path:
+        # FIX-BUG: passer fallback_html explicitement (régression V10 vs V9 — sans
+        # cet argument, render_pdf logue une erreur et ne produit rien du tout
+        # quand WeasyPrint est absent, alors que le V9 écrivait un repli HTML).
         _fb = pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf") else pdf_path + ".html"
         render_pdf(html, pdf_path, fallback_html=_fb)
     return html
 
 
 def _collect_eliminated(universe: Universe, cal: Optional[CalendarSets] = None) -> list[Eliminated]:
-    # cal_status calculé via _compute_cal_status (vrai statut mesuré, pas le
-    # défaut OK du modèle).
+    # Patch comité 03/08/2026 (pt.3) : `cal_status` était laissé au défaut du
+    # modèle (CalStatus.OK) pour tout rejet passant par ce chemin (gates
+    # preflight/univers), contrairement à `_eliminated_from_setups` qui
+    # transmet la vraie valeur — un « OK » d'affichage pouvait donc être une
+    # valeur inventée plutôt que mesurée, sur des actifs en réalité en
+    # PROXIMITY/WATCH/BLACKOUT. On calcule désormais le vrai statut via
+    # `_compute_cal_status`, comme partout ailleurs dans le pipeline.
     out: list[Eliminated] = []
     for asset, code, detail in universe.rejected:
         m = asset.mtf
@@ -2412,6 +2692,7 @@ def _collect_eliminated(universe: Universe, cal: Optional[CalendarSets] = None) 
             age_d1=((m.age_d1 or 0) if m else 0),
             age_known=(m is not None and m.age_d1 is not None),
             cal_status=cal_status,
+            # PATCH-ASSETCLASS : `asset` (CanonicalAsset) est déjà en scope ici.
             asset_class=asset.asset_class,
         ))
     return out
@@ -2424,18 +2705,19 @@ def _eliminated_from_setups(setups: list[SetupV4]) -> list[Eliminated]:
         reject_detail=(s.reject_detail or s.capped_reason or "non-représentant cluster"),
         rsi_h4=s.rsi_h4, age_d1=s.age_d1, cal_status=s.cal_status, rr=s.rr,
         age_known=s.age_known,
+        # PATCH-ASSETCLASS : s (SetupV4) porte déjà le champ depuis _make_draft.
         asset_class=s.asset_class,
     ) for s in setups]
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 15 — INGESTION
+# SECTION 15 — INGESTION  (ported from v9)
 # ════════════════════════════════════════════════════════════════════════════
 def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset], dict]:
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
-    # Vérification version schéma merge
+    # FIX-E02: vérification version schéma merge
     if meta.version:
         try:
             min_version = "3.4.0"
@@ -2451,26 +2733,66 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     for sym, a in (raw.get("assets") or {}).items():
         try:
             assets[sym] = CanonicalAsset.model_validate(a)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             logger.warning("asset %s skipped: %s", sym, exc)
-    # correlation_groups : passage brut, jamais bloquant si absent/malformé.
+    # PATCH-CORRGROUPS (audit comité 27/07/2026) : correlation_groups existe
+    # dans le JSON merge depuis toujours mais n'était jamais lu — perdu à
+    # l'ingestion, pas seulement au rendu. Passage brut (dict), jamais
+    # bloquant si absent ou malformé : c'est une donnée d'appoint pour le
+    # comité en aval, pas une entrée qui conditionne le scoring V4.
     raw_corr = raw.get("correlation_groups")
     correlation_groups: dict = raw_corr if isinstance(raw_corr, dict) else {}
     return meta, assets, correlation_groups
 
 
 def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional[datetime] = None) -> CalendarData:
-    """Charge calendar.json (wrapper Module 04 ou CalendarData natif).
+    """Charge calendar.json produit par le Module 04 (wrapper BLUESTAR) ou par
+    CalendarData natif. Supporte les deux formats sans régression.
 
-    Priorité : ``events_engine`` (passés 72h + futurs) puis ``events`` (UI).
+    Priorité de lecture des events :
+      1. ``events_engine``  — champ dédié ENGINE (passés 72h + futurs, R4/R5)
+      2. ``events``         — champ UI filtré (fallback compatible ancien format)
 
-    L'audit P0-A (`audit_calendar_time_consistency`) utilise gen_at (horloge
-    du flux calendaire) comme référence : c'est un test d'invariant de
-    cohérence INTERNE du flux (fuseau/troncature), car algébriquement
-    offset = ref − cal_gen quelle que soit ref. La fraîcheur Desk-vs-calendrier
-    est un contrôle SÉPARÉ (CALENDAR_STALE / MERGE_STALE, deux conditions
-    opposées jamais agrégées par abs()). `desk_generated_at=None` préserve
-    l'ancien comportement pour les appelants qui ne le fournissent pas."""
+    `desk_generated_at` (V4-08 FIX, round de validation zero-régression,
+    02/08/2026, MAJEUR) : horodatage de génération DU DESK (`merge.json` ::
+    `meta.generated_at`), indépendant du flux calendaire. Nécessaire pour
+    que `audit_calendar_time_consistency` compare deux horloges réellement
+    distinctes.
+
+    Avant ce correctif, l'audit comparait `hours_until` (calculé par
+    `calendar_layer.enrich` avec `event_time_ref = metadata.generated_at_utc`
+    du flux calendaire lui-même) à `(datetime_utc − gen_at)` où `gen_at`
+    était lu... du même `metadata.generated_at_utc`. Les deux termes de la
+    soustraction dérivaient donc de LA MÊME horloge : l'écart mesuré était
+    borné par le seul bruit d'arrondi (`round(h, 2) − h`, ≤ 0,005h), 50 fois
+    sous `CAL_TIME_TOL_H = 0,25h` — un contrôle tautologique, incapable de
+    se déclencher (audit indépendant, rapport RUN-4, V4-08).
+
+    `desk_generated_at=None` (défaut) préserve exactement l'ancien
+    comportement pour tout appelant qui ne le fournit pas (ex. tests
+    existants) — zéro régression. `run_pipeline` le fournit désormais
+    (`meta.generated_at`, disponible dans son scope avant l'appel à
+    `load_calendar`), rendant le contrôle enfin capable de détecter un
+    réel décalage entre l'horloge du flux calendaire et celle du Desk.
+
+    ── REVERT COMITÉ 03/08/2026 (pt.1) ─────────────────────────────────────
+    Le raisonnement ci-dessus était erroné : `audit_calendar_time_consistency`
+    calcule `hu − (dt − ref)`. Comme `hu ≈ dt − cal_gen` côté producteur, le
+    terme `dt` s'annule algébriquement quel que soit `ref` :
+        offset = (dt − cal_gen) − (dt − ref) = ref − cal_gen
+    Ce n'était donc PAS une tautologie de fuseau : c'était (et ça reste) un
+    test d'invariant de cohérence interne du flux calendaire (producteur
+    correct <=> offset ≈ 0). En passant `ref = desk_generated_at`, V4-08 a
+    transformé ce test en une simple mesure de l'écart entre deux horloges
+    de génération différentes (Desk vs flux calendaire) — un signal de
+    FRAÎCHEUR, pas de FUSEAU — et le fait se déclencher dès que les deux
+    fichiers ont plus de `CAL_TIME_TOL_H` d'écart de génération, y compris
+    sur des données parfaitement saines (8/8 concordance garantie par
+    construction algébrique, pas par la qualité des données).
+    `_consistency_ref` revient donc à `gen_at` (horloge du flux calendaire
+    lui-même) : l'audit P0-A redevient un vrai détecteur de fuseau/troncature
+    interne. La mesure de fraîcheur Desk-vs-calendrier est désormais un
+    contrôle séparé et explicitement nommé : voir CALENDAR_STALE ci-dessous."""
     if not calendar_json_path:
         return CalendarData()
     with open(calendar_json_path, encoding="utf-8") as f:
@@ -2478,16 +2800,24 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
 
     raw_dict: dict = json.loads(raw)
 
+    # ── Détection format wrapper Module 04 vs CalendarData natif ────────────
+    # Le wrapper contient "metadata" à la racine ; le format natif ne l'a pas.
     is_wrapper = "metadata" in raw_dict
+    # PATCH-FEEDHORIZON : initialisé AVANT la branche — l'audit de troncature
+    # ci-dessous s'exécute sur les deux formats et doit pouvoir lire gen_at
+    # sans NameError sur le chemin natif.
     gen_at: Optional[datetime] = None
 
     if is_wrapper:
+        # R4 : lire events_engine en priorité (passés 72h + futurs),
+        # fallback sur events (UI filtré, peut être vide en fin de semaine).
         events_raw: list[dict] = (
             raw_dict.get("events_engine")
             or raw_dict.get("events", [])
         )
         meta = raw_dict.get("metadata", {})
 
+        # R1 : logger explicitement si la liste est vide — silent failure sinon
         if not events_raw:
             logger.warning(
                 "calendar.json chargé avec 0 events "
@@ -2505,6 +2835,11 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 logger.debug("calendar event skipped: %s", exc)
 
         gen_at = _parse_iso_utc(meta.get("generated_at_utc"))
+        # REVERT COMITÉ 03/08/2026 (pt.1) : référence = gen_at (horloge du
+        # flux calendaire lui-même), PAS desk_generated_at. Voir docstring
+        # ci-dessus pour la preuve algébrique. Ce contrôle redevient un test
+        # de cohérence interne du calendrier (vrai bug de fuseau/troncature),
+        # indépendant de l'écart de génération avec le Desk.
         off, conc, tot = audit_calendar_time_consistency(events_raw, gen_at)
         if tot and (conc / tot) >= CAL_TIME_MIN_RATIO and abs(off) > CAL_TIME_TOL_H:
             time_degraded = True
@@ -2516,9 +2851,17 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
         else:
             time_degraded, time_offset, time_detail = False, 0.0, ""
 
-        # Fraîcheur — DEUX conditions OPPOSÉES, jamais confondues :
-        # calendrier antérieur au Desk (CALENDAR_STALE) vs snapshot marché
-        # antérieur au calendrier (MERGE_STALE). Affichage seul.
+        # Patch comité 03/08/2026 (pt.2) — CALENDAR_STALE : mesure de
+        # fraîcheur EXPLICITE et SÉPARÉE, Desk (desk_generated_at) vs flux
+        # calendaire (gen_at). Ne conditionne aucune fenêtre de blackout ;
+        # affichage seul ("données au ..."). Le seuil CALENDAR_STALE_TOL_H
+        # est une décision métier (cf. CACHE_TTL du producteur), pas un
+        # invariant de fuseau.
+        # Patch 04/08/2026 — deux conditions opposées, jamais confondues.
+        # L'ancien `abs(age_h) > TOL` étiquetait « CALENDRIER PÉRIMÉ » le cas où
+        # le calendrier est au contraire PLUS RÉCENT que le merge : c'est alors
+        # le snapshot de marché qui est périmé. Accuser le mauvais fichier est
+        # un défaut de véracité d'affichage, pas une nuance de formulation.
         stale, stale_age_h, stale_detail = False, 0.0, ""
         merge_stale, merge_stale_age_h, merge_stale_detail = False, 0.0, ""
         if desk_generated_at and gen_at:
@@ -2560,31 +2903,49 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                             merge_stale_age_h=merge_stale_age_h,
                             merge_stale_detail=merge_stale_detail,
                             covered_currencies=covered,
-                            reachable=bool(meta.get("reachable", True)),
-                            feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False)),
-                            feed_horizon_h=meta.get("feed_horizon_h"),
-                            feed_coverage_detail=meta.get("feed_coverage_detail", ""))
+                            # V4-09 FIX : propager le flag de troncature depuis le wrapper
+                            reachable=bool(meta.get("reachable", True) if is_wrapper else True),
+                            feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False) if is_wrapper else False),
+                            feed_horizon_h=meta.get("feed_horizon_h") if is_wrapper else None,
+                            feed_coverage_detail=meta.get("feed_coverage_detail", "") if is_wrapper else "")
     else:
-        # Format CalendarData natif : validation directe
+        # Format CalendarData natif : validation directe (comportement original)
         data = CalendarData.model_validate_json(raw)
 
-    # ── Horizon réel du flux vs fenêtre WATCH ───────────────────────────────
-    # Aucune décision modifiée : on rend visible une limite de couverture.
-    # Flux vide/non-reachable (wrapper) -> fail-closed.
+    # ── PATCH-FEEDHORIZON (round du 31/07/2026, audit F-15) ─────────────────
+    # Horizon réel du flux comparé à la fenêtre WATCH. Aucune décision n'est
+    # modifiée ici : on rend visible une limite de couverture qui était
+    # jusqu'ici silencieuse et indistinguable d'une absence de risque.
+    # V4-09 FIX : détecter aussi les flux vides/non-reachables → fail-closed
+    # Nettoyage comité 03/08/2026 (pt.4) : `should_have_events` et
+    # `is_truncated_or_unreachable` étaient calculées puis jamais lues
+    # (mortes) — supprimées, aucun comportement n'en dépendait.
     if data.events:
         _ref = gen_at if (is_wrapper and gen_at is not None) else data.parsed_at
-        # Défensif : parsed_at peut être naïf sur un CalendarData natif mal formé.
+        # Défensif : parsed_at n'a pas de validateur de fuseau et un
+        # CalendarData natif mal formé pourrait être naïf. Un TypeError ici
+        # ferait planter tout le pipeline — ce serait une régression.
         if _ref.tzinfo is None:
             _ref = _ref.replace(tzinfo=timezone.utc)
         _feed_end = max(ev.datetime_utc for ev in data.events)
         _horizon_h = (_feed_end - _ref).total_seconds() / 3600.0
+        # PATCH-CALCOVERAGE (04/08/2026) : exposer la borne réelle et
+        # l'horizon calculé indépendamment du seuil WATCH_MAX_H — additif,
+        # ne modifie ni feed_horizon_truncated ni feed_coverage_detail
+        # ci-dessous, qui restent calculés exactement comme avant.
         data.feed_end_utc = _feed_end
         data.feed_horizon_h = _horizon_h
         if _horizon_h < WATCH_MAX_H:
             data.feed_horizon_truncated = True
             data.feed_coverage_detail = (
                 f"couverture du flux : {_ref:%d/%m %H:%M} → {_feed_end:%d/%m %H:%M} UTC "
-                # {:+.0f} affiche le bon signe dans les deux cas (+5h, -28h).
+                # R-12 FIX (round de validation zero-régression, 02/08/2026) :
+                # l'ancien littéral "= +{_horizon_h:.0f}h" produisait "+-28h"
+                # quand _horizon_h est négatif (flux déjà terminé dans le
+                # passé relativement à _ref) — un signe "+" concaténé devant
+                # un nombre déjà négatif, jamais corrigé (audit R-12). Le
+                # flag de format `{:+.0f}` affiche le bon signe dans les
+                # deux cas (+5h, -28h), sans jamais les dupliquer.
                 f"({_horizon_h:+.0f}h) < fenêtre WATCH {WATCH_MAX_H:.0f}h — attendu "
                 f"pour un flux hebdomadaire. Au-delà du {_feed_end:%d/%m %H:%M} UTC, "
                 f"l'absence d'événement au calendrier n'est PAS une absence de "
@@ -2593,21 +2954,618 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
             )
             logger.warning("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
     elif is_wrapper:
-        # Flux vide ou non-reachable → broadcast fail-closed
+        # V4-09 FIX : flux vide ou non-reachable → broadcast fail-closed
         data.feed_horizon_truncated = True
         data.feed_coverage_detail = (
-            "flux calendaire vide ou non accessible — risque NON écarté, "
-            "pas risque nul (attendre une fenêtre complète ou vérifier la source)"
+            f"flux calendaire vide ou non accessible — risque NON écarté, "
+            f"pas risque nul (attender une fenêtre complète ou vérifier la source)"
         )
-        logger.warning("FEED TRONQUÉ OU VIDE : %s", data.feed_coverage_detail)
+        logger.warning("FEED-TRONCU OU VIDE : %s", data.feed_coverage_detail)
 
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
-
 def report_filename(generated_at: datetime, ext: str) -> str:
-    """Nom standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext} (fuseau Clock)."""
+    """Nom de fichier standard BLUESTAR FX Desk_Signal Report_YYYY.MM.DD.{ext}."""
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=timezone.utc)
+    # C-08 : même fuseau que Clock — l'ancien offset fixe pouvait dater le
+    # fichier d'un jour différent de l'en-tête du rapport entre 23:00 et 00:00
+    # UTC en heure d'été.
     local = generated_at.astimezone(Clock._REPORT_TZ)  # pylint: disable=protected-access
     return f"BLUESTAR FX Desk_Signal Report_{local.strftime('%Y.%m.%d')}.{ext}"
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 16 — RENDER  (template calibré + média print A4 — RENDU CORRIGÉ v10.2)
+# ════════════════════════════════════════════════════════════════════════════
+# DESIGN NOTE — PDF calibration (v10.2, RENDU CORRIGÉ) :
+#   Corrections appliquées par rapport au template précédent (cause du rendu
+#   "pas pro" en PDF) :
+#     1. SUPPRESSION DÉFINITIVE des sauts de page forcés tous les 2 setups
+#        (les anciens `.print-ctx-bar.print-pb` sur loop.index odd). Ils
+#        créaient de grands blancs en bas de page + un setup orphelin, exactement
+#        le défaut décrit dans la note d'origine. La pagination automatique
+#        combinée à break-inside:avoid remplit chaque page au maximum sans jamais
+#        couper une carte.
+#     2. Le bandeau de contexte print n'apparaît plus QU'UNE SEULE FOIS, sous
+#        l'en-tête de la section 1 (loop.first), comme repère de cadrage initial.
+#        Plus aucun bandeau de continuation parasite en milieu de flux.
+#     3. Audit trail homogène : toutes les cartes utilisent le même bloc compact
+#        et lisible (plus d'exception sur la dernière carte).
+#     4. En-tête riche en page 1 uniquement (flux) ; pages 2+ ne portent que la
+#        marginale @top-* légère. Plus de double information.
+#     5. Marginales @page épurées + échelle typographique en pt stables pour un
+#        rendu proportionnel identique entre WeasyPrint et l'impression navigateur.
+#     6. La section « Éliminés » démarre proprement sur une nouvelle page
+#        (break-before:page), sans laisser d'orphelin de la section 1.
+_INLINE_TEMPLATE = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+:root{
+  --royal:#1B45B4;--royal-mid:#2355C3;--royal-light:#E8EEFF;--royal-dim:#6B89D8;
+  --bg:#f5f7fc;--white:#fff;--card:#f0f3fa;--dark:#0d1f4e;--body:#1a1a2e;--sec:#3a4a7a;--muted:#6B89D8;--th:#E8EEFF;
+  --green:#1a7a4a;--grn-bg:#e8f5ee;--grn-bd:#6EE7B7;--grn-tx:#065F46;
+  --red:#c0292a;--red-bg:#fdecea;--red-bd:#FCA5A5;--red-tx:#7F1D1D;
+  --blue:#2355C3;--purple:#1B45B4;
+  --border:#dde3f5;--border2:#bbc6e8;--r:5px;--rl:7px;--gap:12px;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;--mono:'IBM Plex Mono','SF Mono','Courier New',monospace
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--body);font-family:var(--sans);font-size:12px;line-height:1.45;-webkit-font-smoothing:antialiased}
+#page{max-width:1180px;margin:0 auto;background:var(--bg)}
+.wrap{padding:14px 20px}
+.section{background:var(--white);border:1px solid var(--border);border-radius:var(--rl);margin-bottom:var(--gap);overflow:hidden;box-shadow:0 1px 3px rgba(13,31,78,.03)}
+.sec-hdr{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid var(--border);background:var(--white)}
+.sec-num{width:22px;height:22px;border-radius:50%;background:var(--royal);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:var(--mono)}
+.sec-ttl{font-size:12px;font-weight:700;color:var(--dark);text-transform:uppercase;letter-spacing:.5px;font-family:var(--mono)}
+.sec-sub{margin-left:auto;font-size:9.5px;color:var(--muted);font-style:italic}
+.sec-body{padding:12px 16px}
+.banner{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx);border-radius:var(--r);padding:9px 14px;margin-bottom:12px;font-family:var(--mono);font-size:10.5px;font-weight:600}
+.banner.warn{background:#fff7e6;border-color:#f0c98a;color:#7a4a00}
+.banner.info{background:var(--royal-light);border-color:var(--royal-dim);color:var(--sec);font-weight:500}
+.setup{border:1px solid var(--border);border-radius:var(--rl);overflow:hidden;margin-bottom:11px;box-shadow:0 1px 2px rgba(13,31,78,.03)}
+.setup:last-child{margin-bottom:0}
+.setup.aaa{border-left:3px solid var(--royal)}.setup.aa{border-left:3px solid var(--royal-mid)}.setup.a{border-left:3px solid var(--green)}.setup.bbb{border-left:3px solid var(--muted)}.setup.bb{border-left:3px solid var(--border2)}.setup.b{border-left:3px solid var(--border2)}
+.setup-hdr{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.setup-hdr.long{background:var(--grn-bg)}.setup-hdr.short{background:var(--red-bg)}
+.pair{font-size:16px;font-weight:700;font-family:var(--mono);color:var(--dark)}
+.dir{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:4px;font-size:10.5px;font-weight:700;font-family:var(--mono)}
+.dir.long{background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-tx)}
+.dir.short{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx)}
+.dir.neutral{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--sec)}
+.conv{display:inline-flex;padding:2px 9px;border-radius:4px;font-size:10.5px;font-weight:700;font-family:var(--mono)}
+.conv.aaa{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal)}
+.conv.aa{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal-mid)}
+.conv.a{background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--green)}
+.conv.bbb,.conv.bb,.conv.b{background:var(--card);border:1px solid var(--border2);color:var(--sec)}
+.scen-lbl{margin-left:auto;font-size:9.5px;color:var(--muted);font-family:var(--mono)}
+.setup-body{padding:12px 16px;background:var(--white)}
+.metrics-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-bottom:11px;padding:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r)}
+.metric{text-align:center;padding:3px 0}
+.metric-lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-family:var(--mono);margin-bottom:2px}
+.metric-val{font-size:12px;font-weight:700;font-family:var(--mono)}
+.metric-val.ok{color:var(--green)}.metric-val.warn{color:var(--royal)}.metric-val.danger{color:var(--red)}
+.factor-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;margin-bottom:11px;padding:9px;background:var(--royal-light);border:1px solid var(--royal-dim);border-radius:var(--r)}
+.factor{text-align:center}
+.factor-lbl{font-size:7.5px;color:var(--royal);text-transform:uppercase;letter-spacing:.5px;font-family:var(--mono);margin-bottom:2px;font-weight:700}
+.factor-val{font-size:12px;font-weight:700;font-family:var(--mono);color:var(--dark)}
+.factor-val.miss{color:var(--muted);font-style:italic}
+.factor.mean .factor-val{color:var(--royal)}
+.px-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-bottom:11px}
+.px-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:8px 10px;text-align:center}
+.px-card.entry{border-top:2px solid var(--royal)}.px-card.sl{border-top:2px solid var(--red)}.px-card.tp1{border-top:2px solid var(--green)}.px-card.tp2{border-top:2px solid var(--royal-mid)}.px-card.rr{border-top:2px solid var(--royal-dim)}
+.px-lbl{font-size:7.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-weight:600;margin-bottom:3px;font-family:var(--mono)}
+.px-val{font-size:14px;font-weight:700;font-family:var(--mono)}
+.px-sub{font-size:8.5px;color:var(--muted);margin-top:2px}
+.rationale{background:var(--royal-light);border-left:3px solid var(--royal);padding:9px 12px;font-size:11px;color:var(--dark);margin-bottom:10px;line-height:1.55;border-radius:var(--r)}
+.rationale strong{display:block;font-size:8.5px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;color:var(--royal);font-family:var(--mono)}
+.flags-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.flag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700;font-family:var(--mono)}
+.flag.minor{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal-mid)}
+.flag.major{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx)}
+.cap-note{font-size:9.5px;color:var(--red);font-family:var(--mono);font-weight:600;margin-bottom:8px}
+.cluster-tag{font-size:9px;font-family:var(--mono);color:var(--sec);background:var(--card);border:1px solid var(--border2);padding:1px 7px;border-radius:4px}
+.cal-row{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--sec);margin-bottom:10px}
+.cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{padding:2px 8px;border-radius:4px;font-size:9.5px;font-weight:700;font-family:var(--mono)}
+.cal-ok{background:var(--grn-bg);border:1px solid var(--grn-bd);color:var(--grn-tx)}
+.cal-watch,.cal-prox,.cal-proximity{background:var(--royal-light);border:1px solid var(--royal-dim);color:var(--royal-mid)}
+.cal-blackout{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx)}
+.sub-lbl{font-size:8.5px;font-weight:700;color:var(--royal);text-transform:uppercase;letter-spacing:1px;margin:11px 0 7px;font-family:var(--mono)}
+.sub-lbl:first-child{margin-top:0}
+.elim{background:var(--card);border:1px solid var(--border);border-left:3px solid var(--border2);border-radius:var(--r);padding:8px 12px;margin-bottom:6px;display:flex;align-items:flex-start;gap:10px}
+.elim.sus{border-left-color:var(--red);background:var(--red-bg)}
+.elim-pair{font-size:12px;font-weight:700;font-family:var(--mono);color:var(--sec);min-width:84px;flex-shrink:0}
+.elim-txt{font-size:10px;color:var(--muted)}
+hr.div{border:none;border-top:1px solid var(--border);margin:9px 0}
+table{width:100%;border-collapse:collapse;font-size:11px}
+thead tr{background:var(--royal)!important}
+thead th{padding:7px 10px;text-align:left;font-size:8.5px;font-weight:700;color:#fff;letter-spacing:.8px;text-transform:uppercase;white-space:nowrap;font-family:var(--mono)}
+tbody tr{border-bottom:1px solid var(--border)}
+tbody tr:nth-child(even){background:var(--card)}
+tbody td{padding:5px 10px;vertical-align:middle}
+.no-setup{background:var(--card);border:2px dashed var(--border2);border-radius:var(--rl);padding:36px 20px;text-align:center}
+.no-setup-icon{font-size:32px;margin-bottom:10px}.no-setup-title{font-size:15px;font-weight:700;color:var(--dark);margin-bottom:6px}.no-setup-sub{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.reject-code{font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--red)}
+.audit-block{background:#0d1f4e;color:#E8EEFF;border-radius:var(--r);padding:9px 12px;margin-top:10px;font-family:var(--mono);font-size:9px;line-height:1.55;word-break:break-word}
+.audit-block strong{color:#6EE7B7;font-size:8.5px;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:4px}
+.footer{text-align:center;font-family:var(--mono);font-size:7.5px;color:var(--muted);border-top:1px solid var(--border);padding:9px 20px;margin-top:4px;letter-spacing:1.2px}
+.page-header{background:linear-gradient(135deg,#F8FAFF 0%,#F0F4FE 100%);border:1px solid var(--border);border-radius:var(--rl) var(--rl) 0 0;display:flex;align-items:center;justify-content:space-between;padding:13px 24px;box-shadow:0 1px 4px rgba(13,31,78,.04),inset 0 1px 0 rgba(255,255,255,.8);position:relative}
+.page-header::after{content:'';position:absolute;bottom:0;left:24px;right:24px;height:2px;background:linear-gradient(90deg,var(--royal),var(--royal-dim),transparent);border-radius:2px}
+.header-left{display:flex;align-items:center;gap:14px}
+.logo-marker{width:42px;height:42px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--white);border:1px solid var(--border);border-radius:var(--r)}
+.sys-label{font-size:8.5px;letter-spacing:.3em;color:var(--royal-dim);font-family:var(--mono);font-weight:600;text-transform:uppercase}
+.sys-name{font-size:26px;font-weight:700;color:var(--dark);letter-spacing:-.02em;line-height:1.1;font-family:var(--mono)}
+.sys-desc{font-size:8.5px;color:var(--muted);font-family:var(--mono);margin-top:2px;letter-spacing:.02em}
+.header-right{text-align:right;border-left:1px solid var(--border2);padding-left:18px}
+.briefing-label{font-size:10.5px;color:var(--royal);font-family:var(--mono);letter-spacing:.08em;font-weight:600;text-transform:uppercase}
+.briefing-sub{font-size:8.5px;color:var(--sec);font-family:var(--mono);margin-top:4px;letter-spacing:.02em}
+.page-subbar{background:rgba(27,69,180,.04);border-left:1px solid var(--border);border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 24px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;font-size:9.5px;font-family:var(--mono);color:var(--sec)}
+.confidential{margin-left:auto;color:var(--royal);font-weight:600;background:rgba(27,69,180,.08);padding:2px 10px;border-radius:20px;font-size:8.5px}
+.page-top{display:block}
+
+/* ════════════════════════════════════════════════════════════════════════════
+# SECTION 17 — CLI
+# ════════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════ PDF / PRINT — CALIBRAGE A4 ZÉRO-BORD ═══════════════ */
+@page{size:A4 portrait;margin:0}
+
+#pdf-fab{position:fixed;bottom:28px;right:28px;z-index:9999}
+#pdf-fab button{background:#1B45B4;color:#fff;border:none;padding:11px 20px;border-radius:8px;font-family:var(--mono);font-size:12px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(27,69,180,.45)}
+@media print{
+  *{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+  html{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;zoom:1!important}
+  body{background:var(--bg)!important;margin:0!important;padding:0!important;width:100%!important;font-size:7pt!important;line-height:1.38!important}
+  #page{max-width:none!important;width:100%!important;margin:0!important;padding:0!important;background:var(--bg)!important}
+
+  /* ── EN-TÊTE : dans le flux du wrap, margin négatif pour full-bleed ── */
+  .page-top{
+    break-inside:avoid!important;break-after:avoid!important;
+    margin:-5mm -5mm 4mm -5mm!important;
+  }
+  .page-header{
+    border-radius:0!important;box-shadow:none!important;
+    padding:3px 5mm!important;min-height:0!important;
+    border-left:none!important;border-right:none!important;border-top:none!important;
+    border-bottom:1px solid var(--border)!important;
+  }
+  .page-header::after{display:none!important}
+  .header-left{gap:6px!important}
+  .sys-name{font-size:10px!important;line-height:1!important}
+  .sys-label{font-size:5pt!important;letter-spacing:.1em!important}
+  .sys-desc{font-size:5pt!important;margin-top:0!important}
+  .briefing-label{font-size:5pt!important}
+  .briefing-sub{font-size:5pt!important;margin-top:1px!important}
+  .logo-marker{width:16px!important;height:16px!important;padding:1px!important}
+  .logo-marker svg{width:14px!important;height:14px!important}
+  .header-right{padding-left:8px!important}
+  .page-subbar{
+    padding:2px 5mm!important;gap:6px!important;font-size:5.5pt!important;
+    border-left:none!important;border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
+  }
+  .confidential{font-size:5pt!important;padding:1px 6px!important}
+  .wrap{padding:5mm 5mm 8mm 5mm!important}
+
+  /* ── SECTION ── */
+  .section{overflow:visible!important;box-shadow:none!important;margin-bottom:7px!important;border:1px solid var(--border)!important}
+  .sec-body{overflow:visible!important;padding:7px 6px!important}
+  .sec-hdr{padding:5px 10px!important;break-after:avoid!important;page-break-after:avoid!important}
+  .sec-num{width:16px!important;height:16px!important;font-size:7pt!important}
+  .sec-ttl{font-size:8pt!important}
+  .sec-sub{font-size:7pt!important}
+
+  /* ── SETUP CARD : autoriser la fragmentation si trop grand, mais garder hdr+premier bloc solidaires ── */
+  .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
+         break-inside:auto!important;page-break-inside:auto!important}
+  .setup-hdr{padding:5px 10px!important;gap:6px!important;
+             break-before:avoid!important;page-break-before:avoid!important;
+             break-after:avoid!important;page-break-after:avoid!important;
+             break-inside:avoid!important;page-break-inside:avoid!important}
+  .factor-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;
+               break-before:avoid!important;page-break-before:avoid!important;
+               break-inside:avoid!important;page-break-inside:avoid!important}
+  .setup-body{padding:6px 10px!important}
+  .pair{font-size:12.5px!important}
+  .dir,.conv{font-size:7.5pt!important;padding:1px 6px!important}
+  .scen-lbl{font-size:7pt!important}
+  .cluster-tag{font-size:7pt!important}
+
+  /* ── GRILLES ── */
+  .factor-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .factor-val{font-size:9pt!important}
+  .metrics-grid{padding:4px 6px!important;gap:3px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .metric-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .metric-val{font-size:9pt!important}
+  .px-grid{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .px-card{padding:4px 7px!important}
+  .px-lbl{font-size:6pt!important;margin-bottom:1px!important}
+  .px-val{font-size:10.5pt!important}
+  .px-sub{font-size:6.5pt!important;margin-top:1px!important}
+
+  /* ── RATIONALE & AUDIT ── */
+  .rationale{padding:5px 8px!important;margin-bottom:5px!important;font-size:6.8pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .rationale strong{font-size:6pt!important;margin-bottom:2px!important}
+  .flags-row{gap:4px!important;margin-bottom:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .flag{font-size:6.5pt!important;padding:1px 5px!important}
+  .cap-note{font-size:6.5pt!important;margin-bottom:4px!important}
+  .cal-row{font-size:7pt!important;margin-bottom:5px!important;gap:5px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .cal-ok,.cal-prox,.cal-proximity,.cal-blackout,.cal-watch{font-size:6.5pt!important;padding:1px 5px!important}
+  .audit-block{padding:5px 8px!important;margin-top:5px!important;font-size:5.9pt!important;line-height:1.32!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .audit-block strong{font-size:6pt!important;margin-bottom:2px!important}
+  .banner{padding:5px 8px!important;margin-bottom:7px!important;font-size:7pt!important;break-inside:avoid!important;page-break-inside:avoid!important}
+
+  /* ── SECTION 2 ── */
+  .section + .section{break-before:page!important;page-break-before:always!important}
+  .sub-lbl{font-size:7pt!important;break-after:avoid!important;page-break-after:avoid!important}
+  .elim{padding:5px 8px!important;margin-bottom:4px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .elim-pair{font-size:8pt!important;min-width:60px!important}
+  .elim-txt{font-size:7pt!important}
+
+  /* ── TABLE ── */
+  table{font-size:7pt!important}
+  thead th{padding:4px 7px!important;font-size:6.5pt!important}
+  tbody td{padding:3px 7px!important}
+  tr,thead{break-inside:avoid!important;page-break-inside:avoid!important}
+  thead{display:table-header-group!important}
+  tfoot{display:table-footer-group!important}
+  .reject-code{font-size:7pt!important}
+
+  /* ── DIVERS ── */
+  .print-ctx-bar{display:none!important}
+  .sus-grid{grid-template-columns:repeat(3,1fr)!important;gap:4px!important}
+  .sus-item{padding:3px 7px!important;break-inside:avoid!important;page-break-inside:avoid!important}
+  .sus-item-pair{font-size:8pt!important}
+  .sus-item-txt{font-size:6.5pt!important}
+  p,li{orphans:3;widows:3}
+  .footer{display:block!important;padding:5px 5mm!important;font-size:6pt!important;letter-spacing:0!important;border-top:1px solid var(--border)!important}
+  a[href]:after{content:""!important}
+  #pdf-fab{display:none!important}
+}
+/* Context bar : masqué écran, repère contextuel print page 1 uniquement */
+.print-ctx-bar{display:none}
+
+/* Blackout grid compact */
+.sus-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px}
+.sus-item{background:var(--red-bg);border:1px solid var(--red-bd);border-left:3px solid var(--red);border-radius:var(--r);padding:5px 9px;display:flex;flex-direction:column;gap:2px}
+.sus-item-pair{font-family:var(--mono);font-weight:700;font-size:11px;color:var(--dark)}
+.sus-item-txt{font-size:9px;color:var(--muted)}
+
+</style>
+</head>
+<body>
+<script>
+function downloadHtml(){
+  const html='<!DOCTYPE html>\n'+document.documentElement.outerHTML;
+  const blob=new Blob([html],{type:'text/html'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download="BLUESTAR FX Desk_Signal Report_{{date_hdr_file}}.html";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+</script>
+<div id="pdf-fab"><button onclick="window.print()">Télécharger PDF</button></div>
+<div id="page">
+<div class="wrap">
+<div class="page-top">
+<div class="page-header">
+  <div class="header-left">
+    <div class="logo-marker"><svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M12 17.27L18.18 21L16.54 13.97L22 9.24L14.81 8.63L12 2L9.19 8.63L2 9.24L7.46 13.97L5.82 21L12 17.27Z" fill="#1B45B4"/></svg></div>
+    <div><div class="sys-label">BLUESTAR SYSTEM</div><div class="sys-name">BLUESTAR</div><div class="sys-desc">FX INSTITUTIONAL DESK · {{version}}</div></div>
+  </div>
+  <div class="header-right"><div class="briefing-label">FX CASCADE · TRADER</div><div class="briefing-sub">{{date_hdr}}</div></div>
+</div>
+<div class="page-subbar">
+  <span>{{date_hdr}}</span>
+  <span style="background:rgba(27,69,180,.12);color:var(--royal);padding:2px 10px;border-radius:20px;font-weight:700;border:1px solid var(--royal-dim)">{{n_setups}} setup(s)</span>
+  <span>Universe <strong>{{n_passed}}/{{n_total}}</strong></span>
+  <span>Event Risk : <strong style="color:{% if event_risk == 'High' %}var(--red){% elif event_risk == 'Medium' %}#EA580C{% else %}var(--green){% endif %}">{{event_risk}}</strong></span>
+  <span>Régime : <strong>{{macro_regime}}</strong></span>
+  {% if themes %}<span>Thèmes : {{themes}}</span>{% endif %}
+  {% if sr_degraded %}<span style="background:var(--card);border:1px solid var(--border);color:var(--muted);padding:2px 10px;border-radius:20px">SR indisponible · mode ATR</span>{% endif %}
+  <span class="confidential">CONFIDENTIEL</span>
+</div>
+</div><!-- /.page-top -->
+
+<div class="section">
+  <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
+  <div class="sec-body">
+  {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
+  {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
+  {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
+  {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
+  {% if cal_uncovered %}<div class="banner info">DEVISES HORS COUVERTURE — {{cal_uncovered|join(', ')}} : aucun événement de ces devises dans le flux (filtre producteur : {{cal_covered|join(', ')}}). Un statut « OK » sur une paire touchant ces devises signifie « non mesuré », pas « dégagé ».</div>{% endif %}
+  {# SR availability indicator déplacé en page-subbar (badge neutre, niveau journée) — v10.2.2 #}
+  {% if setups %}
+  <div class="print-ctx-bar">{{n_setups}} setup(s) validé(s) &nbsp;·&nbsp; Universe {{n_passed}}/{{n_total}} &nbsp;·&nbsp; Event Risk : <strong>{{event_risk}}</strong> &nbsp;·&nbsp; {{date_hdr}}</div>
+  {% for s in setups %}
+  {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
+  {% set arrow = '▲' if s.direction.value == 'Bullish' else '▼' %}
+  {% set cv = s.conviction.value|lower %}
+  {% set fs = s.factor_scores %}
+  <div class="setup {{cv}}" data-asset-class="{{s.asset_class}}">
+    <div class="setup-hdr {{dc}}">
+      <span class="pair">{{s.symbol}}</span>
+      <span class="dir {{dc}}">{{arrow}} {{s.direction.value}}</span>
+      <span class="conv {{cv}}">{{s.conviction.value}} ({{ '%.2f'|format(fs.absolute_mean) }})</span>
+      <span class="cluster-tag">{{s.cluster}}</span>
+      <span class="scen-lbl">{{s.scenario_hint}}{% if s.cal_status.value != 'OK' %} · {{s.cal_status.value}}{% endif %}</span>
+    </div>
+    <div class="setup-body">
+      <div class="factor-grid">
+        <div class="factor"><div class="factor-lbl">F1 HWA</div><div class="factor-val {% if 'f1_hwa' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f1_hwa) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F2 RMG</div><div class="factor-val {% if 'f2_rmg' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f2_rmg) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F3 EXT</div><div class="factor-val {% if 'f3_ext' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f3_ext) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F4 TRG</div><div class="factor-val {% if 'f4_trg' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f4_trg) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F5 XCTX</div><div class="factor-val {% if 'f5_xctx' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f5_xctx) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F6 THM</div><div class="factor-val {% if 'f6_theme' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f6_theme) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F7 MAC</div><div class="factor-val {% if 'f7_macro' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f7_macro) }}</div></div>
+        <div class="factor mean"><div class="factor-lbl">Q-rang</div><div class="factor-val">{{ '%.2f'|format(fs.quantile) }}</div></div>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric"><div class="metric-lbl">Distance ATR</div><div class="metric-val {% if (s.distance_atr or 0) <= 0.3 %}ok{% elif (s.distance_atr or 0) <= 1.0 %}warn{% else %}danger{% endif %}">{{s.distance_atr|round(2)}}×</div></div>
+        <div class="metric"><div class="metric-lbl">Score CHoCH</div><div class="metric-val {% if (s.choch_score or 0) >= 70 %}ok{% elif (s.choch_score or 0) >= 50 %}warn{% else %}danger{% endif %}">{{s.choch_score|round(0)|int if s.choch_score else '—'}}</div>{% if s.choch_info %}<div style="font-size:7px;color:var(--muted);font-family:var(--mono);margin-top:1px">{{s.choch_info}}</div>{% endif %}</div>
+        <div class="metric"><div class="metric-lbl">Quality</div><div class="metric-val {% if s.gps_quality in ['A+','A'] %}ok{% else %}warn{% endif %}">{{s.gps_quality or '—'}}</div></div>
+        <div class="metric"><div class="metric-lbl">MTF %</div><div class="metric-val {% if s.mtf_pct >= 85 %}ok{% elif s.mtf_pct >= 60 %}warn{% else %}danger{% endif %}">{{s.mtf_pct}}%</div></div>
+        <div class="metric"><div class="metric-lbl">RSI H4</div><div class="metric-val {% if s.rsi_h4_status == 'favorable' %}ok{% elif 'extreme' in (s.rsi_h4_status or '') %}danger{% else %}warn{% endif %}">{{s.rsi_h4|round(1) if s.rsi_h4 else '—'}}</div></div>
+        <div class="metric"><div class="metric-lbl">Age</div><div class="metric-val {% if not s.age_known %}warn{% elif s.age_d1 <= 15 %}ok{% elif s.age_d1 <= 30 %}warn{% else %}danger{% endif %}">{% if s.age_known %}{{s.age_d1}}j{% else %}?{% endif %}</div></div>
+      </div>
+      <div class="px-grid">
+        <div class="px-card entry"><div class="px-lbl">Entry</div><div class="px-val" style="color:var(--royal)">{{s.entry}}</div><div class="px-sub">{{s.entry_type}}</div></div>
+        <div class="px-card sl"><div class="px-lbl">Stop Loss</div><div class="px-val" style="color:var(--red)">{{s.sl}}</div><div class="px-sub">{{s.sl_atr_multiple|round(1)}}×ATR</div></div>
+        <div class="px-card tp1"><div class="px-lbl">TP1 (60%)</div><div class="px-val" style="color:var(--green)">{{s.tp1}}</div><div class="px-sub">{% if s.tp1_atr_multiple %}{{s.tp1_atr_multiple}}×ATR{% else %}synth{% endif %}</div></div>
+        <div class="px-card tp2"><div class="px-lbl">TP2 (40%)</div><div class="px-val" style="color:var(--blue)">{{s.tp2 if s.tp2 else '—'}}</div><div class="px-sub">{% if s.tp2_atr_multiple %}{{s.tp2_atr_multiple}}×ATR{% else %}synth{% endif %}</div></div>
+        <div class="px-card rr"><div class="px-lbl">R : R</div><div class="px-val" style="color:var(--purple)">{{s.rr|round(2)}}</div><div class="px-sub">pondéré 60/40{% if s.rr_if_market %} · si marché : {{s.rr_if_market}}{% endif %}</div></div>
+      </div>
+      {% if s.flags %}<div class="flags-row">{% for f in s.flags %}<span class="flag {{f.severity}}">{{f.code}} · {{f.detail}}</span>{% endfor %}</div>{% endif %}
+      {% if s.capped_reason %}<div class="cap-note">Plafond conviction appliqué : {{s.capped_reason}}</div>{% endif %}
+      <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
+      <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
+      {% if s.horizon_days %}<div class="cal-row"><span>Horizon cible ≈ {{s.horizon_days}} j{% if s.horizon_event %} · {{s.horizon_event}}{% endif %}</span></div>{% endif %}
+      {% if s.invalidation %}<div class="audit-block"><strong>Contrat d'invalidation</strong>Prix : {{s.invalidation.price}}<br>Temps : {{s.invalidation.time}}<br>Événement : {{s.invalidation.event}}<br>Structure : {{s.invalidation.structure}}</div>{% endif %}
+      <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · raw={{ '%.4f'|format(fs.absolute_mean_raw) }} · decay={{ '%.4f'|format(fs.decay_factor) }}/{{fs.decay_source}} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="no-setup"><div class="no-setup-icon">∅</div><div class="no-setup-title">Aucun setup conforme aujourd'hui</div><div class="no-setup-sub">Event Risk : {{event_risk}} · Universe {{n_passed}}/{{n_total}}</div></div>
+  {% endif %}
+  </div>
+</div>
+
+<div class="section">
+  <div class="sec-hdr"><div class="sec-num">2</div><div class="sec-ttl">Éliminés &amp; Surveillance</div><div class="sec-sub">{{elimines|length}} actif(s) filtré(s)</div></div>
+  <div class="sec-body">
+  {% set suspendus = elimines | selectattr('reject_code', 'equalto', 'CAL_BLACKOUT') | list %}
+  {% set rejets = elimines | rejectattr('reject_code', 'equalto', 'CAL_BLACKOUT') | list %}
+  {% if suspendus %}
+  <div class="sub-lbl">SUSPENDUS — Calendrier ({{suspendus|length}})</div>
+  <div class="sus-grid">
+  {% for e in suspendus %}
+  {% set dc = 'long' if e.direction.value == 'Bullish' else ('short' if e.direction.value == 'Bearish' else 'neutral') %}
+  <div class="sus-item" data-asset-class="{{e.asset_class}}"><span class="sus-item-pair">{{e.symbol}}</span><span class="dir {{dc}}" style="font-size:9px;padding:1px 5px">{{e.direction.value}}</span><span class="sus-item-txt">{{e.reject_detail}} · RSI H4 : {{e.rsi_h4|round(2) if e.rsi_h4 else '—'}} · Age : {{e.age_d1}}j</span><span class="reject-code" style="display:none">{{e.reject_code}}</span></div>
+  {% endfor %}
+  </div>
+  <hr class="div">
+  {% endif %}
+  {% if rejets %}
+  <div class="sub-lbl">REJETS — Filtre / Preflight / Cluster ({{rejets|length}})</div>
+  <table>
+    <thead><tr><th>Paire</th><th>Dir.</th><th>Code</th><th>Détail</th><th>RSI H4</th><th>Age</th><th>Cal.</th></tr></thead>
+    <tbody>
+    {% for e in rejets %}
+    {% set dc = 'long' if e.direction.value == 'Bullish' else ('short' if e.direction.value == 'Bearish' else 'neutral') %}
+    <tr data-asset-class="{{e.asset_class}}"><td style="font-family:var(--mono);font-weight:700">{{e.symbol}}</td><td><span class="dir {{dc}}" style="font-size:9.5px;padding:1px 6px">{{e.direction.value}}</span></td><td class="reject-code">{{e.reject_code}}</td><td style="font-size:10px">{{e.reject_detail}}</td><td style="font-family:var(--mono);font-size:10px">{{e.rsi_h4|round(2) if e.rsi_h4 else '—'}}</td><td style="font-family:var(--mono);font-size:10px">{{e.age_d1}}j</td><td><span class="cal-{{e.cal_status.value|lower}}" style="font-size:9.5px;padding:1px 6px">{{e.cal_status.value}}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if not elimines %}<div style="padding:14px;color:var(--muted);font-style:italic;font-size:11px">Aucun actif éliminé ce cycle.</div>{% endif %}
+  </div>
+</div>
+
+</div>
+<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
+<script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
+      <script type="application/json" id="calendar-coverage">{{ calendar_coverage_json | safe }}</script>
+</div>
+</body></html>"""
+
+
+def _get_template() -> jinja2.Template:
+    tdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    tfile = os.path.join(tdir, "scaffold.html.j2")
+    if os.path.isfile(tfile):
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(tdir),
+                                 autoescape=jinja2.select_autoescape(["html", "j2"]))
+        return env.get_template("scaffold.html.j2")
+    return jinja2.Environment(autoescape=jinja2.select_autoescape(["html"])).from_string(_INLINE_TEMPLATE)
+
+
+def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
+                  clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
+                  n_passed: int, cfg: V4Config = CONFIG,
+                  correlation_groups: Optional[dict] = None,
+                  macro_regime: MacroRegime = MacroRegime.UNKNOWN,
+                  cal_time_degraded: bool = False,
+                  cal_time_offset: float = 0.0,
+                  cal_time_detail: str = "",
+                  cal_feed_truncated: bool = False,
+                  cal_feed_detail: str = "",
+                  # Patch comité 03/08/2026 (pt.2) : bannière CALENDAR_STALE,
+                  # distincte de l'ALERTE FUSEAU — pur affichage, ne modifie
+                  # aucune fenêtre de blackout ni aucun score.
+                  cal_stale: bool = False,
+                  cal_stale_detail: str = "",
+                  cal_merge_stale: bool = False,
+                  cal_merge_stale_detail: str = "",
+                  cal_covered_currencies: Optional[list[str]] = None,
+                  # PATCH-CALCOVERAGE (04/08/2026) : additif, défaut None ->
+                  # export JSON avec feed_end_utc/horizon_h nuls, comportement
+                  # de rendu par ailleurs strictement inchangé.
+                  cal_feed_end_utc: Optional[datetime] = None,
+                  cal_feed_horizon_h: Optional[float] = None,
+                  version: str = __version__) -> str:
+    risk = "Low"
+    if calendar:
+        if calendar.blackout:
+            risk = "High"
+        elif calendar.proximity:
+            risk = "Medium"
+    theme_str = ", ".join(f"{k} {v}" for k, v in (themes.strong.items() if themes else []))
+    # Évaluation granulaire de la qualité SR (pas binaire)
+    sr_entry_zone = sum(1 for s in setups if s.entry_type == "Limit")
+    # PATCH-SRBADGE (round du 31/07/2026, audit F-10/C-07) : l'ancien test
+    # `not s.rr_synthetic` exigeait TP1 ET TP2 réels — un TP2 ancré sur une
+    # zone SR réelle avec TP1 synthétique (cas fréquent et documenté : zone
+    # opposée lointaine réservée à TP2, cf. compute_tp1/compute_tp2)
+    # affichait à tort "SR indisponible · mode ATR". Nouveau test : au moins
+    # UN niveau (entrée, TP1 ou TP2) ancré sur une zone réelle suffit à lever
+    # le badge.
+    sr_tp_zone = sum(
+        1 for s in setups
+        if (s.tp1_synthetic is False)
+        or (s.tp2 is not None and s.tp2_synthetic is False)
+    )
+    # Objets ancien schéma (tp1_synthetic=None, ex. SetupV4 désérialisé d'un
+    # run antérieur au patch) : logique legacy STRICTEMENT inchangée.
+    sr_tp_zone_legacy = sum(
+        1 for s in setups
+        if s.tp1_synthetic is None and not s.rr_synthetic
+    )
+    # Bandeau uniquement si AUCUNE entrée sur zone ET AUCUN TP sur zone
+    sr_degraded = (sr_entry_zone == 0 and sr_tp_zone == 0
+                   and sr_tp_zone_legacy == 0) if setups else False
+    date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
+    # PATCH-CORRGROUPS : sérialisé une seule fois ici, jamais dans le
+    # template — cf. principe "le HTML n'est jamais une source de vérité
+    # calculée, seulement un support d'affichage/transport".
+    corr_json = json.dumps(correlation_groups or {}, ensure_ascii=False).replace("</", "<\\/")
+    _cov = [c.upper() for c in (cal_covered_currencies or [])]
+    _uncovered: list[str] = []
+    if _cov:
+        _seen: set[str] = set()
+        for _sym in [s.symbol for s in setups] + [e.symbol for e in eliminated]:
+            _b, _q = _split_symbol(_sym)
+            for _leg in (_b, _q):
+                if _leg in _DESK_CURRENCIES and _leg not in _cov:
+                    _seen.add(_leg)
+        _uncovered = sorted(_seen)
+    # PATCH-CALCOVERAGE (audit synergie pipeline, 04/08/2026, Proposition 2) :
+    # export structuré de la couverture calendaire, calqué exactement sur le
+    # patron correlation-groups déjà en production (corr_json ci-dessus).
+    # Purement additif : _cov/_uncovered sont déjà calculés plus haut pour la
+    # bannière HTML existante, aucune nouvelle logique de décision. Absence
+    # de calendrier -> listes vides, feed_end_utc/horizon_h null.
+    _cal_coverage = {
+        "covered": _cov,
+        "uncovered": _uncovered,
+        "feed_end_utc": cal_feed_end_utc.isoformat() if cal_feed_end_utc else None,
+        "horizon_h": (round(cal_feed_horizon_h, 2)
+                      if cal_feed_horizon_h is not None else None),
+    }
+    cal_coverage_json = json.dumps(_cal_coverage, ensure_ascii=False).replace("</", "<\\/")
+    return _get_template().render(
+        date_hdr=clock.date_hdr,
+        date_hdr_file=date_hdr_file,
+        n_setups=len(setups),
+        n_passed=n_passed,
+        n_total=meta.assets_count or (n_passed + len(eliminated)),
+        event_risk=risk, themes=theme_str, sr_degraded=sr_degraded,
+        setups=setups, elimines=eliminated,
+        max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
+        correlation_groups_json=corr_json,
+        macro_regime=macro_regime.value,
+        cal_time_degraded=cal_time_degraded,
+        cal_time_offset=cal_time_offset,
+        cal_time_detail=cal_time_detail,
+        cal_feed_truncated=cal_feed_truncated,
+        cal_feed_detail=cal_feed_detail,
+        cal_stale=cal_stale,
+        cal_stale_detail=cal_stale_detail,
+        cal_merge_stale=cal_merge_stale,
+        cal_merge_stale_detail=cal_merge_stale_detail,
+        cal_covered=_cov,
+        cal_uncovered=_uncovered,
+        calendar_coverage_json=cal_coverage_json,
+    )
+
+
+def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
+               fallback_html: Optional[str] = None) -> str:
+    """Génère un PDF natif CALIBRÉ depuis le HTML via WeasyPrint.
+
+    WeasyPrint applique le bloc @page + @media print du template (A4, marges
+    uniformes, en-tête/pied paginés, anti-coupure des cartes), produisant un
+    document proportionnel et professionnel — sans dépendre du print() navigateur.
+
+    Repli sûr : si WeasyPrint n'est pas installé, passez fallback_html pour
+    écrire un repli HTML explicite. Jamais bloquant.
+    """
+    if not _HAS_WEASYPRINT:
+        if fallback_html is None:
+            logger.error(
+                "WeasyPrint indisponible — PDF non généré. "
+                "Installez-le (`pip install weasyprint`) ou passez fallback_html=... "
+                "pour un repli HTML explicite.")
+            return pdf_path
+        with open(fallback_html, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info("HTML calibré écrit en repli: %s", fallback_html)
+        return fallback_html
+    if base_url is None:
+        base_url = os.getcwd()
+    # FIX-W61 : BytesIO intermédiaire pour compatibilité WeasyPrint 61+ (pydyf)
+    buf = io.BytesIO()
+    _WeasyHTML(string=html, base_url=base_url).write_pdf(buf)
+    with open(pdf_path, "wb") as f:
+        f.write(buf.getvalue())
+    logger.info("PDF natif calibré généré: %s", pdf_path)
+    return pdf_path
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 17 — CLI
+# ════════════════════════════════════════════════════════════════════════════
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    p = argparse.ArgumentParser(description="BLUESTAR ENGINE v10 (Hybrid V4)")
+    p.add_argument("--merged", required=True, help="Path to merge.json")
+    p.add_argument("--calendar", help="Path to Forex Factory HTML (requires upstream LLM parse)")
+    p.add_argument("--calendar-json", help="Path to pre-parsed calendar.json")
+    p.add_argument("--config", help="Optional JSON config overrides")
+    p.add_argument("--output", "-o", help="Output HTML path")
+    p.add_argument("--pdf", help="Output PDF path (PDF natif calibré via WeasyPrint)")
+    args = p.parse_args()
+
+    cfg = CONFIG
+    if args.config:
+        with open(args.config, encoding="utf-8") as f:
+            cfg = V4Config.from_dict(json.load(f))
+
+    html = run_pipeline(
+        merged_path=args.merged,
+        calendar_path=args.calendar,
+        calendar_json_path=args.calendar_json,
+        output_path=args.output,
+        pdf_path=args.pdf,
+        config=cfg,
+    )
+    logger.info("Report generated: %d bytes%s%s", len(html),
+                f" → {args.output}" if args.output else "",
+                f" (PDF → {args.pdf})" if args.pdf else "")
+    if not args.output and not args.pdf:
+        print(html)
+
+
+if __name__ == "__main__":
+    main()
