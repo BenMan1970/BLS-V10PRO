@@ -46,8 +46,9 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.3.0"  # Nettoyage intégral (historique de patches, code mort,
-                        # incohérences CLI) — comportement de scoring inchangé.
+__version__ = "10.4.0"  # Traitement JSON optimal : tier dérivé de l'impact feed,
+                        # valeurs numériques Module 04, hot_zones propagées,
+                        # couverture déduite du flux, signal source (is_stale).
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL PDF BACKEND (jamais bloquant à l'import)
@@ -55,8 +56,10 @@ __version__ = "10.3.0"  # Nettoyage intégral (historique de patches, code mort,
 try:
     from weasyprint import HTML as _WeasyHTML
     _HAS_WEASYPRINT = True
-except Exception:
+    _WEASYPRINT_ERROR = ""
+except Exception as _wp_exc:
     _HAS_WEASYPRINT = False
+    _WEASYPRINT_ERROR = f"{type(_wp_exc).__name__}: {_wp_exc}"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -246,7 +249,7 @@ def _elapsed_bars_fx(start: datetime, end: datetime, timeframe: str) -> int:
 # ════════════════════════════════════════════════════════════════════════════
 _TIER_S = ("non-farm", "nonfarm", "nfp", "fomc", "cpi", "cash rate",
            "bank rate", "rate statement", "interest rate", "monetary policy",
-           "funds rate", "policy rate")
+           "funds rate", "policy rate", "refinancing")
 _TIER_A = ("gdp", "pmi", "adp", "pce", "employment change", "unemployment",
            "average hourly", "retail sales", "ppi")
 _TIER_B = ("speaks", "speech", "press conference", "testifies", "testimony")
@@ -290,6 +293,10 @@ MERGE_STALE_TOL_H = 0.25      # merge ANTÉRIEUR au calendrier
 # couverture du flux calendaire (un indice n'a pas de calendrier propre).
 _DESK_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"})
 
+# Version minimale du schéma merge acceptée — source unique de vérité ;
+# app.py applique la même valeur comme gate bloquant côté UI.
+MIN_MERGE_SCHEMA: tuple = (3, 4, 0)
+
 
 class CalendarEvent(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -302,6 +309,7 @@ class CalendarEvent(BaseModel):
     actual: Optional[str] = None
     forecast: Optional[str] = None
     previous: Optional[str] = None
+    forecast_value: Optional[float] = None  # champ numérique Module 04 (fiable)
     hours_until: Optional[float] = None    # pré-calculé par Module 04, audit uniquement
     priority: Optional[str] = None         # CRITICAL/HIGH/MEDIUM/PAST — audit uniquement
 
@@ -321,6 +329,11 @@ class CalendarEvent(BaseModel):
             self.tier = classify_tier(self.event_name)
         if self.impact is None:
             self.impact = classify_impact(self.event_name)
+        # Cohérence bucket() (fenêtres filtrées par impact) vs logique gated
+        # S/A (blackout score, F7, régime macro) : un event explicitement HIGH
+        # au feed mais au nom non classé ne doit pas être invisible du scoring.
+        if self.tier is EventTier.NONE and self.impact is ImpactLevel.HIGH:
+            self.tier = EventTier.A
         return self
 
 
@@ -367,8 +380,11 @@ class CalendarData(BaseModel):
     merge_stale: bool = False        # MERGE_STALE : snapshot marché antérieur au calendrier
     merge_stale_age_h: float = 0.0
     merge_stale_detail: str = ""
-    # metadata.filters_applied.currencies
+    # metadata.filters_applied.currencies (ou déduit du flux si absent)
     covered_currencies: list[str] = Field(default_factory=list)
+    # Fraîcheur auto-déclarée par la SOURCE du calendrier (metadata Module 04)
+    source_stale: bool = False
+    source_warnings: list[str] = Field(default_factory=list)
     # Borne haute réelle du flux (calculée dans load_calendar) — additif, lu
     # uniquement par l'export JSON calendar-coverage du rendu.
     feed_end_utc: Optional[datetime] = None
@@ -522,6 +538,8 @@ class MergeMeta(BaseModel):
     version: str = ""
     assets_count: int = 0
     signals_count: int = 0
+    scanners_detected: list[str] = Field(default_factory=list)
+    scanners_unknown: int = 0
 
     @field_validator("generated_at")
     @classmethod
@@ -829,10 +847,44 @@ class V4Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> "V4Config":
+        """Overrides JSON (CLI --config) — doctrine fail-closed : clé inconnue
+        ignorée (loggée), type incompatible rejeté ici plutôt que de faire
+        exploser un seuil non numérique au milieu du scoring."""
         base = cls()
         kw = {}
         for k, v in (d or {}).items():
-            if hasattr(base, k):
+            if not hasattr(base, k):
+                logger.warning("config override clé inconnue ignorée: %s", k)
+                continue
+            cur = getattr(base, k)
+            if isinstance(cur, bool):
+                if not isinstance(v, bool):
+                    raise ValueError(f"config.{k}: attendu un booléen, reçu {v!r}")
+                kw[k] = v
+            elif isinstance(cur, (int, float)):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    raise ValueError(f"config.{k}: attendu un nombre, reçu {v!r}")
+                kw[k] = float(v) if isinstance(cur, float) else int(v)
+            elif isinstance(cur, str):
+                if not isinstance(v, str):
+                    raise ValueError(f"config.{k}: attendu une chaîne, reçu {v!r}")
+                kw[k] = v
+            elif isinstance(cur, frozenset):
+                if not isinstance(v, (list, set, frozenset)):
+                    raise ValueError(f"config.{k}: attendu une liste, reçu {v!r}")
+                kw[k] = frozenset(str(x).upper() for x in v)
+            elif isinstance(cur, tuple):
+                if not isinstance(v, (list, tuple)):
+                    raise ValueError(f"config.{k}: attendu une liste, reçu {v!r}")
+                kw[k] = tuple(v)
+            elif isinstance(cur, Mapping):
+                if not isinstance(v, dict) or not v:
+                    raise ValueError(f"config.{k}: attendu un objet JSON non vide, reçu {v!r}")
+                if not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                           for x in v.values()):
+                    raise ValueError(f"config.{k}: valeurs numériques requises, reçu {v!r}")
+                kw[k] = MappingProxyType({str(kk): float(vv) for kk, vv in v.items()})
+            else:
                 kw[k] = v
         return cls(**kw)
 
@@ -1223,7 +1275,10 @@ def _surprise_factor(ev: CalendarEvent) -> float:
     -> 0.7. Utilisé dans f7_macro pour moduler le risque post-event.
     """
     actual = _parse_ff_value(ev.actual)
+    # Le champ numérique du feed (forecast_value) prime sur la chaîne display.
     forecast = _parse_ff_value(ev.forecast)
+    if forecast is None:
+        forecast = ev.forecast_value
     if actual is None or forecast is None:
         # Event qualitatif sans chiffre → risque modéré par défaut
         return 0.7
@@ -1698,10 +1753,13 @@ def _get_opposite_zone(a: CanonicalAsset, direction: Direction) -> Optional[Zone
 def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple[float, str]:
     if ev is not None and a.mtf:
         tf = (ev.timeframe or "").upper()
-        m = {"H1": a.mtf.atr_h1, "H4": a.mtf.atr_h4, "D1": a.mtf.atr_daily}
+        # Senior → ATR daily (le feed émet W1/MN sans ATR dédié).
+        m = {"H1": a.mtf.atr_h1, "H4": a.mtf.atr_h4, "D1": a.mtf.atr_daily,
+             "W1": a.mtf.atr_daily, "MN": a.mtf.atr_daily}
         v = m.get(tf)
         if v and v > 0:
-            return float(v), f"atr_{tf.lower()}"
+            return float(v), ("atr_daily" if tf in ("D1", "W1", "MN")
+                              else f"atr_{tf.lower()}")
     return (a.atr_effective or 0.0), (a.atr_source or "h4")
 
 
@@ -1741,7 +1799,10 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
                ev: Optional[StructureEventView], cfg: V4Config) -> tuple[float, float, str]:
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     bb_regime = ev.bb_regime if ev else "Normal"
-    bb_mult = cfg.BB_REGIME_MULT.get(bb_regime, cfg.DEFAULT_BB_MULT)
+    # Lookup insensible à la casse (mêmes valeurs que _XCTX_BB côté f5, qui
+    # lowercase déjà ; le feed émet « Normal/Squeeze/Expansion » capitalisés).
+    bb_mult = cfg.BB_REGIME_MULT.get((bb_regime or "").capitalize() or "Normal",
+                                     cfg.DEFAULT_BB_MULT)
     if direction is Direction.BULLISH:
         sl_raw = entry - atr * bb_mult
     elif direction is Direction.BEARISH:
@@ -2076,11 +2137,11 @@ def _build_universe(assets: Mapping[str, CanonicalAsset], cal: CalendarSets,
         all_ccy.add(a.base)
         if a.quote:
             all_ccy.add(a.quote)
-    covered_ccy: set[str] = {
-        e.currency
-        for e in list(cal.blackout) + list(cal.proximity) + list(cal.watch)
-    }
-    uncovered = all_ccy - covered_ccy
+    # Couverture = devise présente dans le flux (cal.covered_currencies), pas
+    # « présente dans une fenêtre » — même définition que la bannière de rendu.
+    # Jambes-instruments (XAU, DE30…) exclues : pas de calendrier propre.
+    _cov_set = {str(c).upper() for c in cal.covered_currencies}
+    uncovered = {c for c in (all_ccy - _cov_set) if c in _DESK_CURRENCIES}
     if uncovered:
         logger.info(
             "R5 devises sans couverture calendaire (f7_macro retourne 1.0 par défaut): %s",
@@ -2464,6 +2525,8 @@ def run_pipeline(
                          cal_merge_stale=calendar_data.merge_stale,
                          cal_merge_stale_detail=calendar_data.merge_stale_detail,
                          cal_covered_currencies=calendar_data.covered_currencies,
+                         cal_source_stale=calendar_data.source_stale,
+                         cal_source_warnings=calendar_data.source_warnings,
                          cal_feed_end_utc=calendar_data.feed_end_utc,
                          cal_feed_horizon_h=calendar_data.feed_horizon_h,
                          version=__version__)
@@ -2520,9 +2583,9 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     # Vérification de version du schéma merge (recommandation non bloquante).
     if meta.version:
         try:
-            min_version = "3.4.0"
+            min_v = MIN_MERGE_SCHEMA
+            min_version = ".".join(str(x) for x in min_v)
             meta_v = tuple(int(x) for x in meta.version.split(".")[:3])
-            min_v = tuple(int(x) for x in min_version.split(".")[:3])
             if meta_v < min_v:
                 logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)", meta.version, min_version)
         except (ValueError, AttributeError):
@@ -2539,6 +2602,37 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     # malformé — donnée d'appoint pour le comité aval, pas une entrée de scoring.
     raw_corr = raw.get("correlation_groups")
     correlation_groups: dict = raw_corr if isinstance(raw_corr, dict) else {}
+    # hot_zones (racine) : le producer émet une liste plate par symbole pendant
+    # que le champ par actif peut rester null. Sans propagation, le JSON
+    # fournirait la donnée et le moteur la jetterait (hot_zone_primary mort).
+    _hz_first: dict[str, dict] = {}
+    for _hz in (raw.get("hot_zones") or []):
+        if isinstance(_hz, dict) and isinstance(_hz.get("symbol"), str):
+            _hz_first.setdefault(_hz["symbol"], _hz)
+    for _sym, _a in assets.items():
+        if _a.hot_zone_primary is None and _sym in _hz_first:
+            try:
+                _a.hot_zone_primary = ZoneView.model_validate(_hz_first[_sym])
+            except Exception as exc:
+                logger.warning("hot_zone %s ignorée: %s", _sym, exc)
+    # diagnostics / scanners / cohérence meta-signals : visibilité, zéro décision.
+    if meta.scanners_unknown:
+        logger.warning("merge: %d scanner(s) inconnu(s) au registre producer",
+                       meta.scanners_unknown)
+    diags = raw.get("diagnostics")
+    if isinstance(diags, list):
+        _sev: Counter = Counter(
+            str(d.get("severity", "?")).lower() for d in diags if isinstance(d, dict))
+        for d in diags:
+            if isinstance(d, dict) and str(d.get("severity", "")).lower() in ("error", "warning"):
+                logger.warning("merge diagnostic [%s/%s] %s", d.get("stage"),
+                               d.get("code"), str(d.get("message"))[:200])
+        if _sev:
+            logger.info("diagnostics merge: %s", dict(_sev))
+    if isinstance(raw.get("signals"), list) and meta.signals_count \
+            and len(raw["signals"]) != meta.signals_count:
+        logger.warning("meta.signals_count=%d mais %d objet(s) dans signals",
+                       meta.signals_count, len(raw["signals"]))
     return meta, assets, correlation_groups
 
 
@@ -2662,6 +2756,9 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                             merge_stale_age_h=merge_stale_age_h,
                             merge_stale_detail=merge_stale_detail,
                             covered_currencies=covered,
+                            source_stale=bool(meta.get("is_stale", False)),
+                            source_warnings=[str(w).strip() for w in (meta.get("warnings") or [])
+                                             if str(w).strip()],
                             reachable=bool(meta.get("reachable", True)),
                             feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False)),
                             feed_horizon_h=meta.get("feed_horizon_h"),
@@ -2669,6 +2766,18 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
     else:
         # Format CalendarData natif : validation directe.
         data = CalendarData.model_validate_json(raw)
+
+    if data.source_stale or data.source_warnings:
+        logger.warning("SOURCE CALENDRIER signalée : %s",
+                       ("is_stale=true" if data.source_stale else "")
+                       + (" ; " if data.source_stale and data.source_warnings else "")
+                       + " ; ".join(data.source_warnings))
+
+    # Couverture effective démontrée par le flux quand la métadonnée de filtre
+    # est absente (wrapper) ou le champ omis (CalendarData natif) — jamais une
+    # couverture nulle affirmée à tort. Précède tout appel à bucket().
+    if not data.covered_currencies and data.events:
+        data.covered_currencies = sorted({ev.currency for ev in data.events})
 
     # ── Horizon réel du flux vs fenêtre WATCH ────────────────────────────────
     # Aucune décision modifiée : rend visible une limite de couverture qui
@@ -2977,7 +3086,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
   {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
   {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
-  {% if cal_uncovered %}<div class="banner info">DEVISES HORS COUVERTURE — {{cal_uncovered|join(', ')}} : aucun événement de ces devises dans le flux (filtre producteur : {{cal_covered|join(', ')}}). Un statut « OK » sur une paire touchant ces devises signifie « non mesuré », pas « dégagé ».</div>{% endif %}
+  {% if cal_uncovered %}<div class="banner info">DEVISES HORS COUVERTURE — {{cal_uncovered|join(', ')}} : aucun événement de ces devises dans le flux (filtre : {{cal_covered|join(', ')}}). Un statut « OK » sur une paire touchant ces devises signifie « non mesuré », pas « dégagé ».</div>{% endif %}
+  {% if cal_source_stale or cal_source_warnings %}<div class="banner info">SIGNALÉ PAR LA SOURCE DU CALENDRIER — {% if cal_source_stale %}flux marqué is_stale{{ ' ; ' if cal_source_warnings }}{% endif %}{{cal_source_warnings|join(' ; ')}} — fraîcheur de la source à vérifier ; audit d'affichage, aucune fenêtre de risque modifiée.</div>{% endif %}
   {% if setups %}
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
@@ -3100,6 +3210,9 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_merge_stale: bool = False,
                   cal_merge_stale_detail: str = "",
                   cal_covered_currencies: Optional[list[str]] = None,
+                  # Signal de fraîcheur auto-déclaré par la source (affichage).
+                  cal_source_stale: bool = False,
+                  cal_source_warnings: Optional[list[str]] = None,
                   # Export JSON calendar-coverage (additif, défauts None).
                   cal_feed_end_utc: Optional[datetime] = None,
                   cal_feed_horizon_h: Optional[float] = None,
@@ -3166,6 +3279,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_merge_stale_detail=cal_merge_stale_detail,
         cal_covered=_cov,
         cal_uncovered=_uncovered,
+        cal_source_stale=cal_source_stale,
+        cal_source_warnings=cal_source_warnings or [],
         calendar_coverage_json=cal_coverage_json,
         version=version,
     )
@@ -3237,3 +3352,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+    
