@@ -51,6 +51,7 @@ APP_DIRECTORY = Path(__file__).resolve().parent
 ENGINE_FILENAME = "ENGINE.V10.py"
 ENGINE_MODULE_NAME = "bluestar_engine_v10"
 
+# Doit rester aligné sur ENGINE.V10.MIN_MERGE_SCHEMA (contrat du merged JSON).
 MIN_MERGE_SCHEMA = (3, 4, 0)
 
 REQUIRED_ENGINE_CALLABLES = (
@@ -136,7 +137,8 @@ def _input_fingerprint(
 
 
 def _report_date_from_merged(merged_data: dict[str, Any]) -> str:
-    """Retourne YYYY.MM.DD depuis meta.generated_at, sinon date UTC courante."""
+    """YYYY.MM.DD depuis meta.generated_at, dans le fuseau du rapport
+    (engine.REPORT_TZ — même référence que l'en-tête du document)."""
     generated_at = (merged_data.get("meta") or {}).get("generated_at")
 
     if generated_at:
@@ -148,11 +150,14 @@ def _report_date_from_merged(merged_data: dict[str, Any]) -> str:
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
 
-            return parsed.astimezone(timezone.utc).strftime("%Y.%m.%d")
+            report_tz = getattr(engine, "REPORT_TZ", timezone.utc)
+            return parsed.astimezone(report_tz).strftime("%Y.%m.%d")
         except (TypeError, ValueError):
             pass
 
-    return datetime.now(timezone.utc).strftime("%Y.%m.%d")
+    return datetime.now(
+        getattr(engine, "REPORT_TZ", timezone.utc)
+    ).strftime("%Y.%m.%d")
 
 
 def _clear_report_state() -> None:
@@ -415,8 +420,10 @@ with upload_column_1:
         type=["json", "txt"],
         key="merged_json_upload",
         help=(
-            "Fichier bluestar_merged_*.json. "
-            "Le schéma recommandé est au minimum 3.4.0."
+            "Fichier merged du pipeline "
+            "(ex. merged_pipeline_*.json). "
+            f"Schéma minimum requis : "
+            f"{'.'.join(map(str, MIN_MERGE_SCHEMA))} — bloquant en dessous."
         ),
     )
 
@@ -675,8 +682,10 @@ if generate_clicked:
                 pipeline_arguments: dict[str, Any] = {
                     "merged_path": str(merged_path),
                     "output_path": str(output_path),
-                    "pdf_path": str(pdf_path),
                 }
+
+                if has_native_pdf:
+                    pipeline_arguments["pdf_path"] = str(pdf_path)
 
                 if calendar_bytes is not None:
                     calendar_path.write_bytes(calendar_bytes)
@@ -827,4 +836,6 @@ elif input_errors:
     st.info(
         "Corrige les erreurs de validation avant de lancer le pipeline."
     )
+
+
 
