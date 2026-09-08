@@ -1,2 +1,17 @@
 [server]
-headless = true
+maxUploadSize = 50
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1B45B4"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FC"
+textColor = "#1A1A2E"
+font = "sans serif"
+
+[logger]
+level = "info"
