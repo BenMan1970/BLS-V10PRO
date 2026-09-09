@@ -46,7 +46,7 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.5.3"  # Briefing calendaire orienté décision : releases
+__version__ = "10.6.0"  # Briefing calendaire orienté décision : releases
                         # dédoublonnées (release_group_id), consensus vs
                         # précédent, book exposé, marqueur de traversée
                         # d'événement. Constats d'intégrité rétrogradés en
@@ -667,7 +667,11 @@ class FactorVector:
 
     @property
     def absolute_mean(self) -> float:
-        present = [f.score for f in self.factors.values() if not f.is_missing]
+        # Doctrine 10.6.0 (A) : la lettre note la STRUCTURE. f7_macro reste
+        # affiche (grille F7 CAL), drape (C3/PROXIMITY) et plafonne (caps) —
+        # il ne vote plus dans la moyenne structurelle.
+        present = [f.score for n, f in self.factors.items()
+                   if not f.is_missing and n != "f7_macro"]
         if not present:
             return 0.0
         return sum(present) / len(present)
@@ -2061,13 +2065,15 @@ def assign_clusters(setups: list[SetupV4], themes: MarketThemes) -> dict[str, st
         base, quote = _split_symbol(s.symbol)
         d = s.direction.value
         inv = "Bearish" if d == "Bullish" else "Bullish"
-        key = None
+        legs = []
         if base in themes.strong and themes.strong[base] == d:
-            key = f"{base}_{'strong' if d == 'Bullish' else 'weak'}"
-        elif quote and quote in themes.strong and themes.strong[quote] == inv:
-            key = f"{quote}_{'weak' if d == 'Bullish' else 'strong'}"
-        if key is None:
-            key = f"isolated:{s.symbol}"
+            legs.append(f"{base}_{'strong' if d == 'Bullish' else 'weak'}")
+        if quote and quote in themes.strong and themes.strong[quote] == inv:
+            legs.append(f"{quote}_{'weak' if d == 'Bullish' else 'strong'}")
+        # 10.6.0 : cluster par jambe partagee = la jambe COURTE du trade
+        # (exposition vendue) ; sinon jambe longue ; sinon isole.
+        _weak = [x for x in legs if x.endswith("_weak")]
+        key = min(_weak or legs) if legs else f"isolated:{s.symbol}"
         out[s.symbol] = key
         s.cluster = key
     return out
@@ -2335,7 +2341,8 @@ def _invalidation_structure(a: CanonicalAsset, cfg: V4Config) -> str:
 
 
 def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
-                                 cfg: V4Config) -> dict[str, str]:
+                                 cfg: V4Config,
+                                 horizon_event_days: Optional[float] = None) -> dict[str, str]:
     """P1-D — sortie pure. Toutes les composantes sont déjà calculées ailleurs."""
     if clock is None:
         return {}
@@ -2355,7 +2362,11 @@ def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
     return {
         "price": f"{lv.sl:.5f} (stop)",
         "time": time_txt,
-        "event": (f"contrat EXPIRE à : {ev_txt}" if horizon_event else ev_txt),
+        "event": ((f"contrat EXPIRE à : {ev_txt}"
+                   if (horizon_days and horizon_event_days
+                       and horizon_days > horizon_event_days * cfg.HORIZON_MARGIN)
+                   else f"event S/A en fenêtre (cible avant le mur) : {ev_txt}")
+                  if horizon_event else ev_txt),
         "structure": _invalidation_structure(a, cfg),
     }
 
@@ -2413,7 +2424,8 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector,
         horizon_event=ev_label,
         horizon_event_days=(round(ev_days, 2) if ev_days is not None else None),
         invalidation=_build_invalidation_contract(a, lv, cal, clock, h_days,
-                                                  ev_label, cfg),
+                                                  ev_label, cfg,
+                                                  horizon_event_days=(round(ev_days, 2) if ev_days is not None else None)),
     )
 
 
@@ -2469,13 +2481,24 @@ def _pipeline_factors_and_grades(
         s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail)
                    for f in flags]
         cap, cap_reason = apply_caps(a, fv, config, flags=flags, regime=regime)
-        s.conviction = grade(decayed_mean, flags, cap, config)
+        # 10.6.0 (A) : C3 (proximite S/A) ne vote plus l'echelle des lettres —
+        # il reste flag rouge, plafond (apply_caps) et overlay temporel.
+        grade_flags = [f for f in flags if f.code != "C3"]
+        s.conviction = grade(decayed_mean, grade_flags, cap, config)
         if cap is not None and cap_reason:
-            base_letter = grade(decayed_mean, flags, None, config)
+            base_letter = grade(decayed_mean, grade_flags, None, config)
             if (_CONVICTION_ORDINAL[cap.value]
                     < _CONVICTION_ORDINAL[base_letter.value]):
                 s.capped_reason = cap_reason
         s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
+    # 10.6.0 : quantile aligne sur la note affichee (decayed), pas sur le brut.
+    _qv = sorted(s.factor_scores.absolute_mean for s in drafts)
+    _qn = len(_qv) or 1
+    for s in drafts:
+        _x = s.factor_scores.absolute_mean
+        s.factor_scores.quantile = round(
+            (sum(1 for y in _qv if y < _x)
+             + 0.5 * sum(1 for y in _qv if y == _x)) / _qn, 4)
     return vectors, drafts, lv_cache
 
 
@@ -2569,6 +2592,38 @@ def run_pipeline(
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
+    # 10.6.0 — journal de calibration (env V10_JOURNAL_CSV ; une ligne par
+    # actif et par run ; jamais bloquant).
+    import os as _os
+    _jp = _os.environ.get("V10_JOURNAL_CSV")
+    if _jp:
+        try:
+            import csv as _csv
+            _new = not _os.path.exists(_jp)
+            with open(_jp, "a", newline="", encoding="utf-8") as _f:
+                _w = _csv.writer(_f)
+                if _new:
+                    _w.writerow(["run_utc", "merge_utc", "symbol", "raw_mean",
+                                 "decay", "decayed", "quantile", "f7",
+                                 "f7_missing", "flags", "capped", "letter",
+                                 "published", "regime", "covered", "engine"])
+                _fin = {x.symbol for x in final}
+                for d in drafts:
+                    _w.writerow([clock.now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 meta.generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 d.symbol, d.factor_scores.absolute_mean_raw,
+                                 d.factor_scores.decay_factor,
+                                 d.factor_scores.absolute_mean,
+                                 d.factor_scores.quantile,
+                                 d.factor_scores.f7_macro,
+                                 "f7_macro" in d.factor_scores.missing,
+                                 ",".join(f.code for f in d.flags),
+                                 d.capped_reason or "", d.conviction.value,
+                                 d.symbol in _fin, regime.value,
+                                 ",".join(calendar_data.covered_currencies or []),
+                                 __version__])
+        except OSError:
+            pass
     # 12b — PDF natif (optionnel, jamais bloquant).
     if pdf_path:
         _fb = (pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf")
@@ -3443,7 +3498,10 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         if (s.tp1_synthetic is False)
         or (s.tp2 is not None and s.tp2_synthetic is False)
     )
-    sr_degraded = (sr_entry_zone == 0 and sr_tp_zone == 0) if setups else False
+    _tp_synth = sum(1 for s in setups
+                    if s.tp1_synthetic or (s.tp2 is not None and s.tp2_synthetic))
+    sr_degraded = ((sr_entry_zone == 0 and sr_tp_zone == 0)
+                   or _tp_synth * 2 >= len(setups)) if setups else False
     date_hdr_file = clock.now_local.strftime("%Y.%m.%d")
     # Sérialisé une seule fois ici, jamais dans le template : le HTML n'est
     # qu'un support d'affichage/transport, pas une source de vérité.
