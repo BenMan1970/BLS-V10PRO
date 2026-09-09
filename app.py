@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import platform
 import sys
 import tempfile
@@ -406,6 +407,14 @@ if engine_api_missing:
     st.stop()
 
 run_pipeline = getattr(engine, "run_pipeline")
+
+# Journal de calibration v10 — le moteur append une ligne par actif a
+# chaque run si V10_JOURNAL_CSV est defini. Chemin par defaut : a cote de
+# l'app ; desactivable via "set V10_JOURNAL_CSV=" avant lancement.
+os.environ.setdefault(
+    "V10_JOURNAL_CSV",
+    str(Path(__file__).resolve().parent / "v10_journal.csv"),
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -796,7 +805,19 @@ if isinstance(report_html_state, str) and report_html_state:
 
     st.divider()
 
-    download_column_1, download_column_2 = st.columns(2)
+    download_column_1, download_column_2, download_column_3 = st.columns(3)
+
+    _journal_path = Path(__file__).resolve().parent / "v10_journal.csv"
+    with download_column_3:
+        st.download_button(
+            label="Journal de calibration v10 (CSV)",
+            data=_journal_path.read_bytes() if _journal_path.exists() else b"",
+            file_name=f"v10_journal_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}Z.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=not _journal_path.exists(),
+            help="Une ligne par actif et par scan : decisions completes du moteur. A conserver : sert a etalonner age et calendrier sur donnees reelles (30/60/90 j).",
+        )
 
     with download_column_1:
         st.download_button(
@@ -836,6 +857,9 @@ elif input_errors:
     st.info(
         "Corrige les erreurs de validation avant de lancer le pipeline."
     )
+
+
+
 
 
 
