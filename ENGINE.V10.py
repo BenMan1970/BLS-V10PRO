@@ -46,7 +46,7 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.6.0"  # Briefing calendaire orienté décision : releases
+__version__ = "10.6.2"  # Briefing calendaire orienté décision : releases
                         # dédoublonnées (release_group_id), consensus vs
                         # précédent, book exposé, marqueur de traversée
                         # d'événement. Constats d'intégrité rétrogradés en
@@ -2609,7 +2609,7 @@ def run_pipeline(
                                  "published", "regime", "covered", "engine"])
                 _fin = {x.symbol for x in final}
                 for d in drafts:
-                    _w.writerow([clock.now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    _w.writerow([datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                                  meta.generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
                                  d.symbol, d.factor_scores.absolute_mean_raw,
                                  d.factor_scores.decay_factor,
@@ -3633,3 +3633,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
