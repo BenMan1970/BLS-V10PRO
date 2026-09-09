@@ -46,7 +46,7 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.5.2"  # Briefing calendaire orienté décision : releases
+__version__ = "10.5.3"  # Briefing calendaire orienté décision : releases
                         # dédoublonnées (release_group_id), consensus vs
                         # précédent, book exposé, marqueur de traversée
                         # d'événement. Constats d'intégrité rétrogradés en
@@ -375,6 +375,7 @@ class CalendarSets(BaseModel):
     # Couverture partielle du flux — déclenche le fail-closed F7 (f7_macro).
     feed_horizon_truncated: bool = False
     covered_currencies: list[str] = Field(default_factory=list)
+    feed_end_utc: Optional[datetime] = None
     # La source publie-t-elle les résultats (`actual`) ? Si non, toute mesure
     # de surprise post-event est structurellement impossible : on ne fabrique
     # pas une pénalité résiduelle à partir d'une valeur par défaut.
@@ -449,6 +450,7 @@ class CalendarData(BaseModel):
                             time_offset_hours=self.time_offset_hours,
                             feed_horizon_truncated=self.feed_horizon_truncated,
                             covered_currencies=list(self.covered_currencies),
+                            feed_end_utc=self.feed_end_utc,
                             supports_actual=self.supports_actual)
 
 
@@ -1044,20 +1046,22 @@ def classify_macro_regime(cal: Optional[CalendarSets], clock: "Clock",
     now = clock.now_utc
     horizon = list(cal.blackout) + list(cal.proximity) + list(cal.watch)
 
-    s_slots: set[tuple[str, datetime]] = set()
+    s_slots: dict[str, datetime] = {}  # F-05: release_key -> datetime min
     sa_future: list[float] = []
     sa_past: list[tuple[float, CalendarEvent]] = []
     for ev in horizon:
         delta = (ev.datetime_utc - now).total_seconds() / 3600.0
         if ev.tier is EventTier.S and delta >= 0:
-            s_slots.add((ev.currency, ev.datetime_utc))
+            _k = release_key(ev)
+            if _k not in s_slots or ev.datetime_utc < s_slots[_k]:
+                s_slots[_k] = ev.datetime_utc
         if ev.tier in (EventTier.S, EventTier.A):
             if delta >= 0:
                 sa_future.append(delta)
             else:
                 sa_past.append((delta, ev))
 
-    times = sorted(t for _, t in s_slots)
+    times = sorted(s_slots.values())
     for i, t0 in enumerate(times):
         cnt = sum(1 for t in times[i:]
                   if (t - t0).total_seconds() / 3600.0 <= cfg.MACRO_REGIME_WINDOW_H)
@@ -1385,12 +1389,20 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
                                 f"devise(s) hors couverture du flux "
                                 f"({', '.join(uncovered)}) — fail-closed "
                                 f"(silence invérifiable)")
-        if cal.feed_horizon_truncated:
+        _end = getattr(cal, "feed_end_utc", None)
+        _cover_h = (((_end - now).total_seconds() / 3600.0)
+                    if _end is not None else -1.0)
+        # F-04: fail-closed global 168h remplace par un test par setup:
+        # le feed couvre-t-il la fenetre de risque pertinente (tau)?
+        if cal.feed_horizon_truncated and _cover_h < cfg.MACRO_TAU_HOURS:
             return ScoredFactor("f7_macro", None, 0.0, True,
-                                "aucun event S/A dans la fenêtre couverte mais flux "
-                                "tronqué — fail-closed (silence invérifiable)")
+                                "aucun event S/A dans la fenêtre couverte et "
+                                "flux tronqué sous τ=%.0fh (fin +%.0fh) — "
+                                "fail-closed" % (cfg.MACRO_TAU_HOURS, _cover_h))
         base_score = 1.0
-        base_detail = "aucun event S/A futur"
+        base_detail = ("aucun event S/A futur — silence couvert (feed fin "
+                       "+%.0fh >= τ)" % _cover_h
+                       if cal.feed_horizon_truncated else "aucun event S/A futur")
         base_risk = 0.0
     else:
         hours = min(relevant_h)
@@ -2684,13 +2696,20 @@ def load_calendar(calendar_json_path: Optional[str],
         de blackout — audit et affichage seulement.
     """
     if not calendar_json_path:
-        return CalendarData()
+        # F-01: absence de source = angle mort reel -> fail-closed visible,
+        # JAMAIS un "aucun risque" implicite (le feed ouvert etait le pire etat).
+        return CalendarData(
+            feed_horizon_truncated=True,
+            feed_coverage_detail="AUCUN FLUX CALENDRIER FOURNI — risque "
+                                 "evenementiel NON ecarte (fail-closed)",
+            source_warnings=["aucun_calendrier_fourni — fail-closed"])
     with open(calendar_json_path, encoding="utf-8") as f:
         raw = f.read()
 
     raw_dict: dict = json.loads(raw)
 
     is_wrapper = "metadata" in raw_dict
+    _cov_is_global = False  # F-02: filtres UI explicitement null => flux global
     gen_at: Optional[datetime] = None
 
     if is_wrapper:
@@ -2699,6 +2718,8 @@ def load_calendar(calendar_json_path: Optional[str],
             or raw_dict.get("events", [])
         )
         meta = raw_dict.get("metadata", {})
+        _cov_is_global = (meta.get("ui_filters_applied") is None
+                          and meta.get("filters_applied") is None)
 
         if not events_raw:
             logger.warning(
@@ -2708,6 +2729,7 @@ def load_calendar(calendar_json_path: Optional[str],
                 meta.get("total_high_impact", "?"),
                 meta.get("upcoming_count", "?"),
             )
+            meta["feed_horizon_truncated"] = True  # F-01: vide != nul
 
         cal_events: list[CalendarEvent] = []
         for ev in events_raw:
@@ -2799,8 +2821,15 @@ def load_calendar(calendar_json_path: Optional[str],
         logger.info("source sans résultats publiés (supports_actual=false) — "
                     "mesure de surprise post-event désactivée")
 
-    if not data.covered_currencies and data.events:
-        data.covered_currencies = sorted({ev.currency for ev in data.events})
+    # F-02: ne PLUS deduire la couverture des evenements: "pas d'evenement
+    # NZD cette semaine" = info positive, pas angle mort. null explicite =
+    # flux global (couverture = desk entier); absence totale de cle = repli
+    # prudent sur la deduction (comportement anterieur, signale).
+    if not data.covered_currencies:
+        if _cov_is_global:
+            data.covered_currencies = sorted(_DESK_CURRENCIES)
+        elif data.events:
+            data.covered_currencies = sorted({ev.currency for ev in data.events})
 
     # ── Horizon réel du flux vs fenêtre WATCH ────────────────────────────────
     if data.events:
@@ -3033,7 +3062,7 @@ body{background:var(--bg);color:var(--body);font-family:var(--sans);font-size:12
 .metric{text-align:center;padding:3px 0}
 .metric-lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-family:var(--mono);margin-bottom:2px}
 .metric-val{font-size:12px;font-weight:700;font-family:var(--mono)}
-.metric-val.ok{color:var(--green)}.metric-val.warn{color:var(--royal)}.metric-val.danger{color:var(--red)}
+.metric-val.na{color:var(--muted);font-style:italic}.metric-val.ok{color:var(--green)}.metric-val.warn{color:var(--royal)}.metric-val.danger{color:var(--red)}
 .factor-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;margin-bottom:11px;padding:9px;background:var(--royal-light);border:1px solid var(--royal-dim);border-radius:var(--r)}
 .factor{text-align:center}
 .factor-lbl{font-size:7.5px;color:var(--royal);text-transform:uppercase;letter-spacing:.5px;font-family:var(--mono);margin-bottom:2px;font-weight:700}
@@ -3297,8 +3326,8 @@ tbody td{padding:5px 10px;vertical-align:middle}
         <div class="factor mean"><div class="factor-lbl">Q-rang</div><div class="factor-val">{{ '%.2f'|format(fs.quantile) }}</div></div>
       </div>
       <div class="metrics-grid">
-        <div class="metric"><div class="metric-lbl">Distance ATR</div><div class="metric-val {% if (s.distance_atr or 0) <= 0.3 %}ok{% elif (s.distance_atr or 0) <= 1.0 %}warn{% else %}danger{% endif %}">{{s.distance_atr|round(2)}}×</div></div>
-        <div class="metric"><div class="metric-lbl">Score CHoCH</div><div class="metric-val {% if (s.choch_score or 0) >= 70 %}ok{% elif (s.choch_score or 0) >= 50 %}warn{% else %}danger{% endif %}">{{s.choch_score|round(0)|int if s.choch_score else '—'}}</div>{% if s.choch_info %}<div style="font-size:7px;color:var(--muted);font-family:var(--mono);margin-top:1px">{{s.choch_info}}</div>{% endif %}</div>
+        <div class="metric"><div class="metric-lbl">Distance ATR</div><div class="metric-val {% if s.choch_score is none %}na{% elif (s.distance_atr or 0) <= 0.3 %}ok{% elif (s.distance_atr or 0) <= 1.0 %}warn{% else %}danger{% endif %}">{% if s.choch_score is none %}—{% else %}{{s.distance_atr|round(2)}}×{% endif %}</div></div>
+        <div class="metric"><div class="metric-lbl">Score CHoCH</div><div class="metric-val {% if s.choch_score is none %}na{% elif (s.choch_score or 0) >= 70 %}ok{% elif (s.choch_score or 0) >= 50 %}warn{% else %}danger{% endif %}">{{s.choch_score|round(0)|int if s.choch_score else '—'}}</div>{% if s.choch_info %}<div style="font-size:7px;color:var(--muted);font-family:var(--mono);margin-top:1px">{{s.choch_info}}</div>{% endif %}</div>
         <div class="metric"><div class="metric-lbl">Quality</div><div class="metric-val {% if s.gps_quality in ['A+','A'] %}ok{% else %}warn{% endif %}">{{s.gps_quality or '—'}}</div></div>
         <div class="metric"><div class="metric-lbl">MTF %</div><div class="metric-val {% if s.mtf_pct >= 85 %}ok{% elif s.mtf_pct >= 60 %}warn{% else %}danger{% endif %}">{{s.mtf_pct}}%</div></div>
         <div class="metric"><div class="metric-lbl">RSI H4</div><div class="metric-val {% if s.rsi_h4_status == 'favorable' %}ok{% elif 'extreme' in (s.rsi_h4_status or '') %}danger{% else %}warn{% endif %}">{{s.rsi_h4|round(1) if s.rsi_h4 else '—'}}</div></div>
