@@ -2316,9 +2316,9 @@ def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
         sides = {a.base, (a.quote or "")}
         cov = set(cal.covered_currencies or ()) if cal is not None else set()
         no_data = sorted(c for c in sides if cov and c not in cov)
-        ev_txt = (f"aucune donnée calendrier pour {', '.join(no_data)} dans le flux "
-                  f"— couverture non garantie sur cette paire") if no_data else \
-                 "aucun event S/A sur base ou quote dans l'horizon"
+        # Paire non concernée par le calendrier (devise sans donnée) : rien à
+        # publier sur ce champ plutôt qu'une phrase sur l'absence de données.
+        ev_txt = "" if no_data else "aucun event S/A sur base ou quote dans l'horizon"
     return {
         "price": f"{lv.sl:.5f} (stop)",
         "time": time_txt,
@@ -3094,7 +3094,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
   {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
-  {% if cal_uncovered %}<div class="banner info">DEVISES SANS PUBLICATION DANS LE FLUX — {{cal_uncovered|join(', ')}} : aucune publication retenue (HIGH/MEDIUM) identifiée dans la fenêtre couverte pour ces devises ; seules {{cal_covered|join(', ')}} ont des publications cette semaine dans le flux public. Un statut « OK » sur une paire touchant {{cal_uncovered|join(', ')}} signifie « aucune publication détectée », pas « risque écarté ».</div>{% endif %}
+  {% if cal_concerned %}<div class="banner info">PAIRES CONCERNÉES PAR UNE PUBLICATION (HIGH, S/A) — {{cal_concerned|join(' · ')}}</div>{% endif %}
   {% if cal_source_stale or cal_source_warnings %}<div class="banner info">SIGNALÉ PAR LA SOURCE DU CALENDRIER — {% if cal_source_stale %}flux marqué is_stale{{ ' ; ' if cal_source_warnings }}{% endif %}{{cal_source_warnings|join(' ; ')}} — fraîcheur de la source à vérifier ; audit d'affichage, aucune fenêtre de risque modifiée.</div>{% endif %}
   {% if setups %}
   {% for s in setups %}
@@ -3141,7 +3141,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
       <div class="rationale"><strong>Rationale</strong>{{s.rationale}}{% if s.cal_note %} · <em>{{s.cal_note}}</em>{% endif %}</div>
       <div class="cal-row"><span class="cal-{{s.cal_status.value|lower}}">{{s.cal_status.value}}</span>{% if s.cal_note %}<span>{{s.cal_note}}</span>{% endif %}</div>
       {% if s.horizon_days %}<div class="cal-row"><span>Horizon cible ≈ {{s.horizon_days}} j{% if s.horizon_event %} · {{s.horizon_event}}{% endif %}</span></div>{% endif %}
-      {% if s.invalidation %}<div class="audit-block"><strong>Contrat d'invalidation</strong>Prix : {{s.invalidation.price}}<br>Temps : {{s.invalidation.time}}<br>Événement : {{s.invalidation.event}}<br>Structure : {{s.invalidation.structure}}</div>{% endif %}
+      {% if s.invalidation %}<div class="audit-block"><strong>Contrat d'invalidation</strong>Prix : {{s.invalidation.price}}<br>Temps : {{s.invalidation.time}}<br>{% if s.invalidation.event %}Événement : {{s.invalidation.event}}<br>{% endif %}Structure : {{s.invalidation.structure}}</div>{% endif %}
       <div class="audit-block"><strong>Audit Trail</strong>{{s.sl_detail}}<br>{{s.rr_detail}}<br>absolute_mean={{ '%.4f'|format(fs.absolute_mean) }} · raw={{ '%.4f'|format(fs.absolute_mean_raw) }} · decay={{ '%.4f'|format(fs.decay_factor) }}/{{fs.decay_source}} · quantile={{ '%.4f'|format(fs.quantile) }} · missing={{fs.missing}}<br>{% for k,v in fs.details.items() %}{{v}}<br>{% endfor %}ATR={{s.atr_source}} · cluster={{s.cluster}} · htf={{s.htf_aligned}}</div>
     </div>
   </div>
@@ -3255,8 +3255,31 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                 if _leg in _DESK_CURRENCIES and _leg not in _cov:
                     _seen.add(_leg)
         _uncovered = sorted(_seen)
+    # Paires réellement concernées par une publication S/A à venir — seul ce qui
+    # est concerné est publié au desk (rien sur les paires hors-sujet, cf. R6).
+    _next_event_by_ccy: dict[str, CalendarEvent] = {}
+    if calendar is not None:
+        for _ev in list(calendar.blackout) + list(calendar.proximity) + list(calendar.watch):
+            if _ev.tier not in (EventTier.S, EventTier.A):
+                continue
+            _prev = _next_event_by_ccy.get(_ev.currency)
+            if _prev is None or _ev.datetime_utc < _prev.datetime_utc:
+                _next_event_by_ccy[_ev.currency] = _ev
+    # Restreint aux setups publiés (le sujet du rapport) : une liste sur tout
+    # l'univers scanné serait aussi bruyante que la bannière qu'elle remplace.
+    _concerned: list[str] = []
+    if _next_event_by_ccy:
+        _now_utc = clock.now_utc
+        for s in setups:
+            _b, _q = _split_symbol(s.symbol)
+            _hit = _next_event_by_ccy.get(_b) or _next_event_by_ccy.get(_q)
+            if _hit is None:
+                continue
+            _j = (_hit.datetime_utc - _now_utc).total_seconds() / 86400.0
+            _concerned.append(f"{s.symbol} — {_hit.currency} {_hit.event_name} (J+{_j:.1f})")
+        _concerned.sort()
     # Export structuré de la couverture calendaire (patron correlation-groups).
-    # Additif : _cov/_uncovered sont déjà calculés pour la bannière HTML.
+    # Additif : _cov/_uncovered sont déjà calculés pour l'export JSON.
     # Absence de calendrier -> listes vides, feed_end_utc/horizon_h null.
     _cal_coverage = {
         "covered": _cov,
@@ -3287,6 +3310,7 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         cal_merge_stale_detail=cal_merge_stale_detail,
         cal_covered=_cov,
         cal_uncovered=_uncovered,
+        cal_concerned=_concerned,
         cal_source_stale=cal_source_stale,
         cal_source_warnings=cal_source_warnings or [],
         calendar_coverage_json=cal_coverage_json,
