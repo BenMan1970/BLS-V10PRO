@@ -46,13 +46,22 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.5.0"  # Briefing calendaire orienté décision : releases
+__version__ = "10.5.1"  # Briefing calendaire orienté décision : releases
                         # dédoublonnées (release_group_id), consensus vs
                         # précédent, book exposé, marqueur de traversée
                         # d'événement. Constats d'intégrité rétrogradés en
                         # note ; seules les anomalies actionnables restent en
                         # bandeau. C3 dédoublonné. _surprise_factor neutralisé
                         # quand la source ne publie pas les résultats.
+                        # f7_macro : le risque par devise est calculé avant
+                        # tout garde-fou de couverture globale — un event S/A
+                        # daté et identifié n'est plus écrasé par un 0.00
+                        # « non mesuré » au seul motif que le flux ne couvre
+                        # pas 168h. Fail-closed réservé aux deux angles morts
+                        # réels (devise hors flux, silence sur fenêtre
+                        # tronquée). MACRO_COVERAGE_GRANULAR déprécié (ex-
+                        # comportement devenu permanent). CONVICTIONS
+                        # DÉPLACÉES — cf. doctrine d'activation du flag.
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL PDF BACKEND (jamais bloquant à l'import)
@@ -852,13 +861,16 @@ class V4Config:
     BBB_MIN: float = 0.42
     BB_MIN: float = 0.30
     MACRO_CAP_RISK_THRESHOLD: float = 0.50   # macro RISK >= 0.5 -> cap AA
-    # OPT-IN — défaut False = comportement actuel bit pour bit.
-    # False : flux tronqué -> f7 neutralisé pour TOUS les actifs (flag toujours
-    #         vrai sur un feed hebdo => cap AA universel).
-    # True  : f7 mesuré si le prochain event S/A tombe dans la fenêtre couverte ;
-    #         fail-closed seulement si le silence est invérifiable.
-    # MODIFIE convictions et sélection — exige un A/B >= 20 sessions archivées
-    # avant activation. Ne pas activer sans validation.
+    # DÉPRÉCIÉ (10.5.1) — conservé uniquement pour compat descendante des
+    # configs JSON existantes (clé acceptée, silencieusement sans effet).
+    # f7_macro calcule désormais TOUJOURS le risque par devise dès qu'un event
+    # S/A daté est identifié pour cette devise, avant tout garde-fou de
+    # couverture globale : un event connu n'est jamais remplacé par un 0.00
+    # « non mesuré ». Le fail-closed ne s'applique plus qu'aux deux angles
+    # morts réels (devise hors flux, ou silence sur une fenêtre tronquée).
+    # Ce changement DÉPLACE LES CONVICTIONS produites par le moteur — validez
+    # sur des sessions archivées avant bascule en production live, comme
+    # l'exigeait déjà la doctrine d'activation de ce flag.
     MACRO_COVERAGE_GRANULAR: bool = False
     # alpha decay (age_d1 -> score penalty). DECAY_TIME_CONSTANT est le tau de
     # exp(-age/tau), PAS une demi-vie (demi-vie = tau × ln(2) ≈ 24 j).
@@ -1332,10 +1344,11 @@ def _surprise_factor(ev: CalendarEvent) -> float:
 
 def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
              cfg: V4Config = CONFIG) -> ScoredFactor:
-    # cal absent OU flux tronqué -> FAIL-CLOSED : risque NON écarté (score 0.0).
-    if cal is None or (not cfg.MACRO_COVERAGE_GRANULAR and cal.feed_horizon_truncated):
+    # cal absent -> aucune information, quelle que soit la devise : angle mort
+    # réel, fail-closed immédiat (risque NON écarté, pas risque nul).
+    if cal is None:
         return ScoredFactor("f7_macro", None, 0.0, True,
-                            "calendrier absent ou tronqué — fail-closed (risque NON écarté, "
+                            "aucun calendrier chargé — fail-closed (risque NON écarté, "
                             "pas risque nul)")
     sides = {a.base, (a.quote or "")}
     # Blackout active -> score 0 (hard veto handled in preflight)
@@ -1345,6 +1358,10 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
     horizon: list[CalendarEvent] = list(cal.blackout) + list(cal.proximity) + list(cal.watch)
 
     # ── Chemin futur ────────────────────────────────────────────────────────
+    # Le risque par devise est calculé AVANT tout garde-fou de couverture
+    # globale : un event S/A identifié pour CETTE devise (avec son horodatage
+    # réel) est une donnée, pas une absence — le fail-closed ne doit jamais
+    # écraser une information qu'on possède déjà.
     relevant_h: list[float] = []
     for ev in horizon:
         if ev.tier not in (EventTier.S, EventTier.A):
@@ -1356,19 +1373,22 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
             relevant_h.append(delta)
 
     if not relevant_h:
-        if cfg.MACRO_COVERAGE_GRANULAR:
-            cov = set(cal.covered_currencies or ())
-            uncovered = sorted(c for c in sides
-                               if cov and c in _DESK_CURRENCIES and c not in cov)
-            if uncovered:
-                return ScoredFactor("f7_macro", None, 0.0, True,
-                                    f"devise(s) hors couverture du flux "
-                                    f"({', '.join(uncovered)}) — fail-closed "
-                                    f"(silence invérifiable)")
-            if cal.feed_horizon_truncated:
-                return ScoredFactor("f7_macro", None, 0.0, True,
-                                    "aucun event S/A dans la fenêtre couverte mais flux "
-                                    "tronqué — fail-closed (silence invérifiable)")
+        # Ici seulement : aucun event connu pour cette devise. Deux angles
+        # morts réels et distincts, fail-closed dans les deux cas ; sinon,
+        # silence == absence de risque S/A à l'horizon couvert (donnée, pas
+        # supposition).
+        cov = set(cal.covered_currencies or ())
+        uncovered = sorted(c for c in sides
+                           if cov and c in _DESK_CURRENCIES and c not in cov)
+        if uncovered:
+            return ScoredFactor("f7_macro", None, 0.0, True,
+                                f"devise(s) hors couverture du flux "
+                                f"({', '.join(uncovered)}) — fail-closed "
+                                f"(silence invérifiable)")
+        if cal.feed_horizon_truncated:
+            return ScoredFactor("f7_macro", None, 0.0, True,
+                                "aucun event S/A dans la fenêtre couverte mais flux "
+                                "tronqué — fail-closed (silence invérifiable)")
         base_score = 1.0
         base_detail = "aucun event S/A futur"
         base_risk = 0.0
