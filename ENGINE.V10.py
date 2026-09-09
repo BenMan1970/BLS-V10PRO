@@ -46,9 +46,13 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.4.0"  # Traitement JSON optimal : tier dérivé de l'impact feed,
-                        # valeurs numériques Module 04, hot_zones propagées,
-                        # couverture déduite du flux, signal source (is_stale).
+__version__ = "10.5.0"  # Briefing calendaire orienté décision : releases
+                        # dédoublonnées (release_group_id), consensus vs
+                        # précédent, book exposé, marqueur de traversée
+                        # d'événement. Constats d'intégrité rétrogradés en
+                        # note ; seules les anomalies actionnables restent en
+                        # bandeau. C3 dédoublonné. _surprise_factor neutralisé
+                        # quand la source ne publie pas les résultats.
 
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — OPTIONAL PDF BACKEND (jamais bloquant à l'import)
@@ -293,6 +297,13 @@ MERGE_STALE_TOL_H = 0.25      # merge ANTÉRIEUR au calendrier
 # couverture du flux calendaire (un indice n'a pas de calendrier propre).
 _DESK_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"})
 
+# Avertissements de source qui décrivent une CAPACITÉ constante du flux, pas un
+# incident : ils n'ont rien à faire dans un bandeau d'alerte. Le flux Fair
+# Economy hebdomadaire ne publie jamais les résultats (`supports_actual=false`)
+# ; l'annoncer comme un problème de fraîcheur contredit `is_stale=false` et
+# `quality_status=VALID` émis par la même métadonnée.
+_BENIGN_SOURCE_WARNINGS = frozenset({"SOURCE_DOES_NOT_PROVIDE_ACTUAL"})
+
 # Version minimale du schéma merge acceptée — source unique de vérité ;
 # app.py applique la même valeur comme gate bloquant côté UI.
 MIN_MERGE_SCHEMA: tuple = (3, 4, 0)
@@ -310,6 +321,11 @@ class CalendarEvent(BaseModel):
     forecast: Optional[str] = None
     previous: Optional[str] = None
     forecast_value: Optional[float] = None  # champ numérique Module 04 (fiable)
+    previous_value: Optional[float] = None  # idem, côté valeur précédente
+    # Identifiant de communiqué : Forex Factory éclate un même release en
+    # plusieurs lignes (CPI m/m + y/y + Core m/m + Core y/y). Un desk annonce
+    # une publication, pas quatre.
+    release_group_id: Optional[str] = None
     hours_until: Optional[float] = None    # pré-calculé par Module 04, audit uniquement
     priority: Optional[str] = None         # CRITICAL/HIGH/MEDIUM/PAST — audit uniquement
 
@@ -350,6 +366,10 @@ class CalendarSets(BaseModel):
     # Couverture partielle du flux — déclenche le fail-closed F7 (f7_macro).
     feed_horizon_truncated: bool = False
     covered_currencies: list[str] = Field(default_factory=list)
+    # La source publie-t-elle les résultats (`actual`) ? Si non, toute mesure
+    # de surprise post-event est structurellement impossible : on ne fabrique
+    # pas une pénalité résiduelle à partir d'une valeur par défaut.
+    supports_actual: bool = True
 
     @model_validator(mode="after")
     def _sets(self) -> "CalendarSets":
@@ -380,11 +400,14 @@ class CalendarData(BaseModel):
     merge_stale: bool = False        # MERGE_STALE : snapshot marché antérieur au calendrier
     merge_stale_age_h: float = 0.0
     merge_stale_detail: str = ""
-    # metadata.filters_applied.currencies (ou déduit du flux si absent)
+    # metadata.filters_applied.currencies (ou ui_filters_applied, ou déduit du flux)
     covered_currencies: list[str] = Field(default_factory=list)
     # Fraîcheur auto-déclarée par la SOURCE du calendrier (metadata Module 04)
     source_stale: bool = False
     source_warnings: list[str] = Field(default_factory=list)
+    source_quality: str = "VALID"
+    source_quality_score: Optional[float] = None
+    supports_actual: bool = True
     # Borne haute réelle du flux (calculée dans load_calendar) — additif, lu
     # uniquement par l'export JSON calendar-coverage du rendu.
     feed_end_utc: Optional[datetime] = None
@@ -416,7 +439,8 @@ class CalendarData(BaseModel):
                             time_degraded=self.time_degraded,
                             time_offset_hours=self.time_offset_hours,
                             feed_horizon_truncated=self.feed_horizon_truncated,
-                            covered_currencies=list(self.covered_currencies))
+                            covered_currencies=list(self.covered_currencies),
+                            supports_actual=self.supports_actual)
 
 
 def audit_calendar_time_consistency(
@@ -440,6 +464,45 @@ def audit_calendar_time_consistency(
         return 0.0, 0, 0
     med = _median(offsets)
     return med, sum(1 for o in offsets if abs(o - med) <= tol_h), len(offsets)
+
+
+# ── Regroupement par communiqué ─────────────────────────────────────────────
+_TIER_LABEL: Mapping[EventTier, str] = MappingProxyType({
+    EventTier.S: "S", EventTier.A: "A", EventTier.B: "B", EventTier.NONE: "—",
+})
+_TIER_ORDER: Mapping[EventTier, int] = MappingProxyType({
+    EventTier.S: 0, EventTier.A: 1, EventTier.B: 2, EventTier.NONE: 3,
+})
+
+
+def release_key(ev: CalendarEvent) -> str:
+    """Clé de communiqué. release_group_id quand la source le fournit, sinon
+    repli déterministe (devise + horodatage) : deux lignes publiées à la même
+    seconde pour la même devise sont le même release."""
+    return ev.release_group_id or f"{ev.currency}|{ev.datetime_utc.isoformat()}"
+
+
+def release_headline(group: list[CalendarEvent]) -> CalendarEvent:
+    """Ligne représentative d'un communiqué : tier le plus fort d'abord, puis
+    libellé le plus court ('Core CPI y/y' est un détail de 'CPI m/m'), puis
+    ordre alphabétique. Entièrement déterministe."""
+    return sorted(group, key=lambda e: (_TIER_ORDER[e.tier], len(e.event_name),
+                                        e.event_name))[0]
+
+
+def group_releases(events: Iterable[CalendarEvent],
+                   tiers: tuple[EventTier, ...] = (EventTier.S, EventTier.A)
+                   ) -> list[list[CalendarEvent]]:
+    """Regroupe une liste d'événements en communiqués, filtrés par tier.
+    Ordre de sortie : chronologique, puis devise (stable)."""
+    groups: dict[str, list[CalendarEvent]] = defaultdict(list)
+    for ev in events:
+        if ev.tier in tiers:
+            groups[release_key(ev)].append(ev)
+    out = list(groups.values())
+    out.sort(key=lambda g: (min(e.datetime_utc for e in g),
+                            release_headline(g).currency))
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -658,7 +721,7 @@ class SetupV4(BaseModel):
     atr_source: str = "unknown"
     distance_atr: float = 0.0
     choch_score: Optional[float] = None
-    choch_info: Optional[str] = None   # label court si CHoCH présent (aligné ou non) ex: "H4 Bearish 85 (3c)"
+    choch_info: Optional[str] = None   # label court si CHoCH présent (aligné ou non)
     gps_quality: Optional[str] = None
     mtf_pct: int = 0
     rsi_h4: Optional[float] = None
@@ -731,7 +794,8 @@ class MarketThemes:
         signed = sum(contributions) / len(contributions)  # [-1,1]
         return _clamp01((signed + 1.0) / 2.0)
 
-    def is_counter_theme(self, base: str, quote: Optional[str], direction: Direction) -> tuple[bool, float]:
+    def is_counter_theme(self, base: str, quote: Optional[str],
+                         direction: Direction) -> tuple[bool, float]:
         """True + cohesion if the trade fights a high-cohesion dominant theme."""
         d = direction.value
         inv = "Bearish" if d == "Bullish" else "Bullish"
@@ -769,11 +833,11 @@ class V4Config:
     TRG_FRESH_MAX: int = 6
     TRG_DIST_ATR_MAX: float = 1.0
     # SR structure bonus dans F4 (zone SR multi-TF proche du trigger)
-    SR_BONUS_MAX: float = 0.20       # bonus max ajouté au score F4 si zone SR multi-TF alignée
-    SR_DIST_MAX_PCT: float = 2.0     # distance max (%) pour qu'une zone soit considérée proche
-    SR_W_W1: float = 0.50            # poids W1 dans le score SR composite
-    SR_W_D1: float = 0.30            # poids D1
-    SR_W_H4: float = 0.20            # poids H4
+    SR_BONUS_MAX: float = 0.20
+    SR_DIST_MAX_PCT: float = 2.0
+    SR_W_W1: float = 0.50
+    SR_W_D1: float = 0.30
+    SR_W_H4: float = 0.20
     # F6 THEME
     THEME_MIN_VOTES: int = 3
     THEME_BULL_HI: float = 0.8
@@ -799,7 +863,7 @@ class V4Config:
     # alpha decay (age_d1 -> score penalty). DECAY_TIME_CONSTANT est le tau de
     # exp(-age/tau), PAS une demi-vie (demi-vie = tau × ln(2) ≈ 24 j).
     DECAY_TIME_CONSTANT: int = 35
-    DECAY_FLOOR: float = 0.30        # plancher : un signal très vieux ne score jamais 0
+    DECAY_FLOOR: float = 0.30
     # contradictions
     C1_TRG_MIN: float = 0.5
     C1_RMG_MAX: float = 0.35
@@ -809,8 +873,7 @@ class V4Config:
     # séparée, pour éviter toute dérive cap/flag).
     C4_DIST_ATR: float = 1.0
     # ── Cohérence d'horizon (C7) ────────────────────────────────────────────
-    # [NON CALIBRÉ] Alerte d'ordre de grandeur, pas une mesure. HORIZON_MARGIN
-    # absorbe l'imprécision (discrimine 3,7 j vs 2,0 j, pas 2,2 j vs 2,0 j).
+    # [NON CALIBRÉ] Alerte d'ordre de grandeur, pas une mesure.
     HORIZON_ATR_REALIZATION_RATE: float = 0.6
     HORIZON_MARGIN: float = 1.25
     # ── Réconciliation de fraîcheur (C9) ────────────────────────────────────
@@ -820,13 +883,13 @@ class V4Config:
     MACRO_REGIME_WINDOW_H: float = 48.0   # fenêtre GLISSANTE
     MACRO_REGIME_MIN_S: int = 3           # slots tier-S DISTINCTS
     MACRO_VACUUM_H: float = 120.0
-    # ── C10 — divergence RSI senior contre-tendance (contradiction, pas cap) ─
-    # [NON CALIBRÉ] Magnitude minimale (strength × confidence) pour traiter une
-    # divergence senior comme contradiction structurelle.
+    # ── C10 — divergence RSI senior contre-tendance ─────────────────────────
     C10_DIV_SENIOR_TFS: tuple = ("W1", "D1")
     C10_DIV_MIN_EVIDENCE: float = 0.25
     # ── Contrat d'invalidation (P1-D) ───────────────────────────────────────
     INVALIDATION_TIME_MULT: float = 1.5
+    # ── Briefing calendaire (affichage) ─────────────────────────────────────
+    CAL_BRIEF_CONTEXT_MAX: int = 3        # releases hors book affichés en toile de fond
     # preflight
     RR_MIN: float = 1.5
     RR_MAX: float = 20.0
@@ -839,11 +902,11 @@ class V4Config:
     LIMIT_ZONE_MAX_DIST: float = 2.0
     TP1_ATR_MULT: float = 2.0
     TP2_ATR_MULT: float = 1.0
-    TP_MAX_ATR_MULT: float = 4.0       # Garde: zone SR utilisée comme TP doit être ≤ 4×ATR
+    TP_MAX_ATR_MULT: float = 4.0
     # selection
     MAX_SETUPS: int = 5
     MAX_EXPOSURE_PER_CCY: int = 2
-    MIN_CONVICTION: str = "BB"       # conviction minimum post-decay pour la sélection
+    MIN_CONVICTION: str = "BB"
 
     @classmethod
     def from_dict(cls, d: dict) -> "V4Config":
@@ -906,6 +969,7 @@ _XCTX_VOL = MappingProxyType({
 })
 _XCTX_SESSION = MappingProxyType({
     "london": 1.0, "newyork": 1.0, "ny": 1.0, "us": 1.0, "london_ny_overlap": 1.0,
+    "overlap": 1.0, "overlap_london_ny": 1.0,
     "asian": 0.5, "tokyo": 0.5, "sydney": 0.5,
     "off": 0.0,
     "": 0.3,
@@ -915,8 +979,6 @@ _XCTX_BB = MappingProxyType({"squeeze": 1.0, "normal": 0.6, "expansion": 0.3, ""
 _EXT_STATUSES = ("extreme_overbought", "extreme_oversold", "overbought", "oversold")
 
 # RSI divergence — poids par timeframe (somme théorique max = 0.74).
-# Seules les divergences confirmées (div_confirmed=True) contraires à la
-# direction du trade entrent en compte. Cap final à 0.40 sur le score F2.
 _DIV_TF_WEIGHT: Mapping[str, float] = MappingProxyType(
     {"W1": 0.35, "D1": 0.20, "H4": 0.12, "H1": 0.05, "M15": 0.02}
 )
@@ -925,7 +987,8 @@ _DIV_TF_WEIGHT: Mapping[str, float] = MappingProxyType(
 # ════════════════════════════════════════════════════════════════════════════
 # SECTION 7 — THEME DETECTION (avec cohésion)
 # ════════════════════════════════════════════════════════════════════════════
-def detect_currency_themes(assets: Mapping[str, CanonicalAsset], cfg: V4Config = CONFIG) -> MarketThemes:
+def detect_currency_themes(assets: Mapping[str, CanonicalAsset],
+                           cfg: V4Config = CONFIG) -> MarketThemes:
     votes: dict[str, list[str]] = defaultdict(list)
     for a in assets.values():
         if not a.mtf or a.mtf.direction is Direction.NEUTRAL:
@@ -1017,18 +1080,8 @@ def _rsi_status(a: CanonicalAsset, tf: str) -> str:
 
 
 def _divergence_penalty(a: CanonicalAsset) -> float:
-    """Retourne une pénalité [0.0, 0.40] représentant la pression des divergences RSI
-    confirmées contraires à la direction du trade.
-
-    Règles :
-    - Seules les entrées avec ``div_confirmed == True`` sont prises en compte.
-    - Seules les divergences *contraires* à la direction MTF pénalisent
-      (une divergence dans le sens du trade est neutre pour F2).
-    - Le poids est proportionnel à ``div_strength_score × div_confidence_score``
-      et pondéré par le timeframe (W1 > D1 > H4 > H1 > M15).
-    - Le résultat est capé à 0.40 pour ne jamais annuler le signal à lui seul.
-    - Si MTF absent ou aucune divergence confirmée contraire : retourne 0.0.
-    """
+    """Pénalité [0.0, 0.40] : pression des divergences RSI confirmées contraires
+    à la direction du trade. Une divergence dans le sens du trade est neutre."""
     if a.mtf is None:
         return 0.0
     direction = a.mtf.direction
@@ -1040,7 +1093,6 @@ def _divergence_penalty(a: CanonicalAsset) -> float:
         if not d.get("div_confirmed"):
             continue
         div_dir = str(d.get("divergence") or "").lower()
-        # Divergence contraire = bearish sur trade bullish, ou bullish sur trade bearish
         is_contra = (
             (direction is Direction.BULLISH and div_dir == "bearish")
             or (direction is Direction.BEARISH and div_dir == "bullish")
@@ -1091,7 +1143,8 @@ def f1_hwa(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
         b = (biases.get(tf) or "Range")
         if _dir_eq(_norm_dir(b), direction) and _norm_dir(b) is not Direction.NEUTRAL:
             s = 1
-        elif _norm_dir(b) is _opposite_dir(direction) and _opposite_dir(direction) is not Direction.NEUTRAL:
+        elif (_norm_dir(b) is _opposite_dir(direction)
+              and _opposite_dir(direction) is not Direction.NEUTRAL):
             s = -1
             conflicts.append(tf)
         else:
@@ -1118,7 +1171,6 @@ def f2_rmg(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     grad = fast - slow
     signed = grad if a.mtf.direction is Direction.BULLISH else -grad
     score = _clamp01(0.5 + 0.5 * math.tanh(signed / cfg.RMG_SCALE))
-    # Pénalité divergence : divergences confirmées contraires à la direction
     div_penalty = _divergence_penalty(a)
     score = _clamp01(score - div_penalty)
     detail = f"RMG fast={fast:.1f} slow={slow:.1f} grad={grad:.1f} signed={signed:.1f}"
@@ -1141,7 +1193,6 @@ def f3_ext(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
         is_ext = any(k in st for k in _EXT_STATUSES)
         if not is_ext:
             continue
-        # overheated in the direction of the trade = bad
         if direction is Direction.BULLISH and ("overbought" in st):
             ext_in_dir += 1
         elif direction is Direction.BEARISH and ("oversold" in st):
@@ -1152,16 +1203,7 @@ def f3_ext(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
 
 
 def _sr_structure_bonus(a: CanonicalAsset, cfg: V4Config) -> tuple[float, str]:
-    """Bonus SR [0.0, SR_BONUS_MAX] si une zone SR proche est confirmée sur plusieurs TF.
-
-    Logique :
-    - Cherche dans a.zones la zone la plus proche du prix (distance_pct minimale)
-      dont le side est compatible avec la direction du trade.
-    - Si distance_pct > SR_DIST_MAX_PCT : pas de bonus (zone trop lointaine).
-    - Score composite = SR_W_W1 * has_weekly + SR_W_D1 * has_daily + SR_W_H4 * has_h4
-    - Bonus = composite × SR_BONUS_MAX (bonus maximal si W1+D1+H4 tous présents).
-    - Retourne (bonus, detail_str).
-    """
+    """Bonus SR [0.0, SR_BONUS_MAX] si une zone SR proche est confirmée multi-TF."""
     if a.mtf is None or not a.zones:
         return 0.0, "SR: pas de zones"
 
@@ -1178,7 +1220,6 @@ def _sr_structure_bonus(a: CanonicalAsset, cfg: V4Config) -> tuple[float, str]:
     if not candidates:
         return 0.0, f"SR: aucune zone compatible <{cfg.SR_DIST_MAX_PCT}%"
 
-    # Zone la plus proche
     best = min(candidates, key=lambda z: z.distance_pct)
     composite = (
         cfg.SR_W_W1 * float(best.has_weekly)
@@ -1242,7 +1283,8 @@ def f5_xctx(a: CanonicalAsset, cfg: V4Config = CONFIG) -> ScoredFactor:
     return ScoredFactor("f5_xctx", None, score, False, detail)
 
 
-def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) -> ScoredFactor:
+def f6_theme(a: CanonicalAsset, themes: MarketThemes,
+             cfg: V4Config = CONFIG) -> ScoredFactor:
     if a.mtf is None:
         return ScoredFactor("f6_theme", None, 0.5, True, "MTF absent")
     score = themes.bonus_for(a.base, a.quote, a.mtf.direction)
@@ -1252,9 +1294,7 @@ def f6_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config = CONFIG) ->
 
 
 def _parse_ff_value(s: Optional[str]) -> Optional[float]:
-    """Parse les valeurs Forex Factory ('0.5%', '25.8K', '-0.1%') en float.
-    Retourne None si la valeur est absente ou non numérique (ex: Rate Statement).
-    """
+    """Parse les valeurs Forex Factory ('0.5%', '25.8K', '-0.1%') en float."""
     if not s or s in ("—", "", "N/A", "n/a"):
         return None
     try:
@@ -1269,24 +1309,24 @@ def _parse_ff_value(s: Optional[str]) -> Optional[float]:
 
 
 def _surprise_factor(ev: CalendarEvent) -> float:
-    """Facteur de magnitude de surprise pour un event passé, dans [0.2, 1.0].
-    1.0 = surprise nulle (inline) ; plancher 0.2 = surprise majeure
-    (volatilité résiduelle élevée) ; event qualitatif sans chiffres parseables
-    -> 0.7. Utilisé dans f7_macro pour moduler le risque post-event.
+    """Magnitude de surprise pour un event passé, dans [0.2, 1.0].
+
+    N'est appelée QUE lorsque la source publie réellement les résultats
+    (`CalendarSets.supports_actual`). Sur un flux sans `actual`, cette fonction
+    retournerait 0.7 pour chaque événement — une pénalité résiduelle inventée à
+    partir de rien. L'appelant garde donc la responsabilité du filtre.
     """
     actual = _parse_ff_value(ev.actual)
-    # Le champ numérique du feed (forecast_value) prime sur la chaîne display.
     forecast = _parse_ff_value(ev.forecast)
     if forecast is None:
         forecast = ev.forecast_value
     if actual is None or forecast is None:
-        # Event qualitatif sans chiffre → risque modéré par défaut
+        # Event qualitatif (Rate Statement, press conf) : pas de chiffre à
+        # comparer, risque modéré par défaut.
         return 0.7
     if abs(forecast) < 1e-9:
         return 0.5
     deviation = abs(actual - forecast) / (abs(forecast) + 1e-9)
-    # deviation > 50% → surprise majeure → factor = 0.2
-    # deviation   0% → inline           → factor = 1.0
     return _clamp01(1.0 - min(deviation * 2.0, 0.8))
 
 
@@ -1338,39 +1378,49 @@ def f7_macro(a: CanonicalAsset, cal: Optional[CalendarSets], clock: Clock,
         base_score = _clamp01(1.0 - base_risk)
         base_detail = f"MACRO event S/A dans {hours:.1f}h risk={base_risk:.2f} -> {base_score:.2f}"
 
-    # ── Risque résiduel post-event (events passés récents) ──────────────────
-    # Modulation plafonnée à 0.25 : ne peut jamais inverser un signal.
+    # ── Risque résiduel post-event ──────────────────────────────────────────
+    # Deux garde-fous :
+    #  1. la source doit publier les résultats, sinon la « surprise » serait une
+    #     constante déguisée en mesure ;
+    #  2. structurellement, un event passé dans sa fenêtre `after` place déjà sa
+    #     devise en BLACKOUT (early-return plus haut) — ce bloc n'est donc actif
+    #     que sur des configurations de fenêtres non standard. Conservé tel quel
+    #     pour ne pas dépendre implicitement de cette coïncidence.
     residual_parts: list[str] = []
     residual_penalty = 0.0
-    for ev in horizon:
-        if ev.tier not in (EventTier.S, EventTier.A):
-            continue
-        if ev.currency not in sides:
-            continue
-        delta = (ev.datetime_utc - now).total_seconds() / 3600.0
-        if delta >= 0:
-            continue   # futur, déjà traité ci-dessus
-        _, after = TIER_WINDOWS.get(ev.tier, DEFAULT_TIER_WINDOW)
-        if delta < -after:
-            continue   # hors fenêtre post-event
-        surprise = _surprise_factor(ev)
-        # decay exponentiel : plus l'event est récent, plus la pénalité est forte
-        recency = math.exp(delta / max(after / 3.0, 1.0))   # delta < 0 → recency ∈ (0,1)
-        penalty = recency * (1.0 - surprise)
-        if penalty > 0.05:
-            residual_penalty += penalty
-            residual_parts.append(
-                f"résidu {ev.currency} {ev.event_name[:18]} surprise={surprise:.2f}"
-            )
+    if cal.supports_actual:
+        for ev in horizon:
+            if ev.tier not in (EventTier.S, EventTier.A):
+                continue
+            if ev.currency not in sides:
+                continue
+            delta = (ev.datetime_utc - now).total_seconds() / 3600.0
+            if delta >= 0:
+                continue   # futur, déjà traité ci-dessus
+            _, after = TIER_WINDOWS.get(ev.tier, DEFAULT_TIER_WINDOW)
+            if delta < -after:
+                continue   # hors fenêtre post-event
+            surprise = _surprise_factor(ev)
+            recency = math.exp(delta / max(after / 3.0, 1.0))   # delta < 0 → (0,1)
+            penalty = recency * (1.0 - surprise)
+            if penalty > 0.05:
+                residual_penalty += penalty
+                residual_parts.append(
+                    f"résidu {ev.currency} {ev.event_name[:18]} surprise={surprise:.2f}"
+                )
+        residual_penalty = min(residual_penalty, 0.25)   # cap absolu
+    else:
+        residual_parts.append("post-event non mesurable (source sans résultats) — "
+                              "aucune pénalité inventée")
 
-    residual_penalty = min(residual_penalty, 0.25)   # cap absolu : jamais dominant
     final_score = _clamp01(base_score - residual_penalty)
     detail_parts = [base_detail]
     if residual_parts:
         detail_parts.append("post-event: " + "; ".join(residual_parts))
     detail = " | ".join(detail_parts)
 
-    return ScoredFactor("f7_macro", base_risk if relevant_h else 0.0, final_score, False, detail)
+    return ScoredFactor("f7_macro", base_risk if relevant_h else 0.0,
+                        final_score, False, detail)
 
 
 def build_factor_vector(a: CanonicalAsset, themes: MarketThemes,
@@ -1392,13 +1442,7 @@ def build_factor_vector(a: CanonicalAsset, themes: MarketThemes,
 # SECTION 9 — SCORING (absolute) + CROSS-SECTION (tie-break/diversif ONLY)
 # ════════════════════════════════════════════════════════════════════════════
 def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
-    """Multiplicateur exponentiel [DECAY_FLOOR, 1.0] selon l'âge du signal.
-
-    decay = max(DECAY_FLOOR, exp(-age / DECAY_TIME_CONSTANT)), DECAY_TIME_CONSTANT
-    étant le tau (demi-vie = tau × ln(2) ≈ 24 j ; age=50j -> floor 0.30).
-    Le plancher évite d'éjecter un signal structurellement solide mais âgé :
-    la conviction finale reste portée par les flags et caps, pas par le seul decay.
-    """
+    """Multiplicateur exponentiel [DECAY_FLOOR, 1.0] selon l'âge du signal."""
     if age_d1 <= 0:
         return 1.0
     raw = math.exp(-age_d1 / cfg.DECAY_TIME_CONSTANT)
@@ -1407,9 +1451,8 @@ def _alpha_decay_factor(age_d1: int, cfg: V4Config) -> float:
 
 def resolve_unknown_decay(known_ages: list[int], cfg: V4Config) -> tuple[float, str]:
     """Decay applicable quand age_d1 est None : médiane empirique du decay de
-    l'univers du run (déterministe, aucune constante en dur). Repli : DECAY_FLOOR.
-    Une absence d'information ne doit jamais payer le bonus de fraîcheur maximal.
-    """
+    l'univers du run. Une absence d'information ne paie jamais le bonus de
+    fraîcheur maximal."""
     if known_ages:
         return _median([_alpha_decay_factor(a, cfg) for a in known_ages]), "universe_median"
     return cfg.DECAY_FLOOR, "floor_no_reference"
@@ -1426,22 +1469,19 @@ def compute_quantiles(vectors: list[FactorVector]) -> dict[str, float]:
     for sym, m in means:
         below = sum(1 for x in values if x < m)
         equal = sum(1 for x in values if x == m)
-        # mid-rank percentile, deterministic
         out[sym] = (below + 0.5 * equal) / n if n else 0.0
     return out
 
 
 def rank_setups(setups: list[SetupV4], cfg: V4Config = CONFIG) -> list[SetupV4]:
-    """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile.
-    Quantile NEVER influences conviction; only ordering here. Symbol is the
-    final stable secondary key for bit-for-bit reproducibility."""
+    """Sort DESC by absolute_mean; tie-break f4 -> f1 -> low-macro-risk -> quantile."""
     def key(s: SetupV4):
         fs = s.factor_scores
         return (
             -fs.absolute_mean,
             -fs.f4_trg,
             -fs.f1_hwa,
-            -fs.f7_macro,      # higher f7 = lower macro risk preferred
+            -fs.f7_macro,
             -fs.quantile,
             s.symbol,
         )
@@ -1463,24 +1503,31 @@ def _target_horizon_days(a: CanonicalAsset, lv: "LevelBundle",
 
 def _next_macro_event_days(a: CanonicalAsset, cal: Optional[CalendarSets],
                            clock: Clock) -> tuple[Optional[float], Optional[str]]:
-    """Prochain event tier S/A touchant base ou quote. (jours, libellé)."""
+    """Prochain communiqué tier S/A touchant base ou quote. (jours, libellé).
+
+    Regroupé par release : le libellé annonce la publication, pas la première
+    ligne du bloc.
+    """
     if cal is None:
         return None, None
     sides = {a.base, (a.quote or "")}
     now = clock.now_utc
-    best: Optional[tuple[float, CalendarEvent]] = None
-    for ev in list(cal.blackout) + list(cal.proximity):
-        if ev.tier not in (EventTier.S, EventTier.A) or ev.currency not in sides:
-            continue
-        d = (ev.datetime_utc - now).total_seconds() / 3600.0
+    scoped = [ev for ev in (list(cal.blackout) + list(cal.proximity))
+              if ev.currency in sides]
+    best: Optional[tuple[float, CalendarEvent, int]] = None
+    for grp in group_releases(scoped):
+        when = min(e.datetime_utc for e in grp)
+        d = (when - now).total_seconds() / 3600.0
         if d < 0:
             continue
         if best is None or d < best[0]:
-            best = (d, ev)
+            best = (d, release_headline(grp), len(grp) - 1)
     if best is None:
         return None, None
-    days = best[0] / 24.0
-    return days, f"{best[1].currency} {best[1].event_name} (J+{days:.1f})"
+    hours, head, extra = best
+    days = hours / 24.0
+    suffix = f" +{extra}" if extra else ""
+    return days, f"{head.currency} {head.event_name}{suffix} (J+{days:.1f})"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1504,21 +1551,27 @@ def _c2_momentum_vs_trend(fv: FactorVector, cfg: V4Config) -> Optional[Flag]:
 
 def _c3_trend_vs_calendar(a: CanonicalAsset, fv: FactorVector,
                           cal: Optional[CalendarSets], cfg: V4Config) -> Optional[Flag]:
-    # Émis dès que le risque (1 - f7) atteint le seuil du cap AA (f7 <= seuil),
-    # cohérence stricte avec apply_caps().
+    """Émis dès que le risque (1 - f7) atteint le seuil du cap AA, cohérence
+    stricte avec apply_caps(). Les communiqués sont dédoublonnés : « Core PPI
+    m/m, PPI m/m » est une seule publication, pas deux risques distincts."""
     if fv.get("f7_macro") > cfg.MACRO_CAP_RISK_THRESHOLD:
         return None
     if cal is None:
         return None
     sides = {a.base, (a.quote or "")}
-    # Scope S+A : mêmes events que ceux qui baissent f7_macro / déclenchent le cap.
-    tier_sa = [e for e in (list(cal.blackout) + list(cal.proximity))
-               if e.tier in (EventTier.S, EventTier.A) and e.currency in sides]
-    if tier_sa:
-        names = ", ".join(f"{e.currency} {e.event_name}" for e in tier_sa[:2])
-        return Flag("C3", "major",
-                    f"Risque calendaire élevé (MACRO={fv.get('f7_macro'):.2f}) : {names}")
-    return None
+    scoped = [e for e in (list(cal.blackout) + list(cal.proximity))
+              if e.currency in sides]
+    groups = group_releases(scoped)
+    if not groups:
+        return None
+    labels: list[str] = []
+    for grp in groups[:2]:
+        head = release_headline(grp)
+        extra = len(grp) - 1
+        labels.append(f"{head.currency} {head.event_name}" + (f" +{extra}" if extra else ""))
+    return Flag("C3", "major",
+                f"Risque calendaire élevé (MACRO={fv.get('f7_macro'):.2f}) : "
+                + ", ".join(labels))
 
 
 def _c4_quality_vs_potential(a: CanonicalAsset, cfg: V4Config) -> Optional[Flag]:
@@ -1532,7 +1585,8 @@ def _c4_quality_vs_potential(a: CanonicalAsset, cfg: V4Config) -> Optional[Flag]
     return None
 
 
-def _c5_trade_vs_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config) -> Optional[Flag]:
+def _c5_trade_vs_theme(a: CanonicalAsset, themes: MarketThemes,
+                       cfg: V4Config) -> Optional[Flag]:
     if a.mtf is None:
         return None
     counter, coh = themes.is_counter_theme(a.base, a.quote, a.mtf.direction)
@@ -1543,11 +1597,7 @@ def _c5_trade_vs_theme(a: CanonicalAsset, themes: MarketThemes, cfg: V4Config) -
 
 
 def _c6_structural_escalation(a: CanonicalAsset) -> Optional[Flag]:
-    """C6 — séquence CHoCH contre-tendance ascendante sur seniorité des TF
-    (ex. H1 → H4 → D1 bearish sur un actif MTF bullish), signalée par
-    market_context. Severity: major. None si market_context absent ou
-    escalation_detected faux.
-    """
+    """Séquence CHoCH contre-tendance ascendante sur seniorité des TF."""
     evs = (a.market_context or {}).get("structure_events_summary") or {}
     if not evs.get("escalation_detected"):
         return None
@@ -1594,12 +1644,7 @@ def _c9_freshness_mismatch(a: CanonicalAsset, now: Optional[datetime],
 
 
 def _c10_htf_divergence(a: CanonicalAsset, cfg: V4Config = CONFIG) -> Optional[Flag]:
-    """Divergence RSI confirmée, CONTRAIRE au trade, sur TF senior (W1/D1).
-
-    Source : a.rsi_by_tf (comme _divergence_penalty/F2), jamais market_context
-    (il ne transporte ni div_strength_score ni div_confidence_score).
-    None si MTF absent ou Neutral — pas de flag inventé.
-    """
+    """Divergence RSI confirmée, CONTRAIRE au trade, sur TF senior (W1/D1)."""
     if a.mtf is None or a.mtf.direction is Direction.NEUTRAL:
         return None
     contra = _opposite_dir(a.mtf.direction)
@@ -1623,13 +1668,7 @@ def _c10_htf_divergence(a: CanonicalAsset, cfg: V4Config = CONFIG) -> Optional[F
 
 
 def _c11_stale_price_market_entry(a: CanonicalAsset, entry_type: str) -> Optional[Flag]:
-    """C11 — entrée "Market" construite sur un prix marqué périmé.
-
-    Émis seulement quand entry_type == "Market" (seul cas où compute_entry
-    utilise current_price tel quel ; une entrée "Limit" s'ancre sur un niveau
-    S/R) ET que la couche de fusion en amont a marqué le prix "stale".
-    Sévérité major : défaut d'intégrité de donnée, pèse dans k au grade.
-    """
+    """Entrée « Market » construite sur un prix marqué périmé."""
     if entry_type != "Market":
         return None
     if (a.current_price_source or "").lower() != "stale":
@@ -1670,12 +1709,10 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
                ) -> tuple[Optional[Conviction], Optional[str]]:
     """Returns the most restrictive cap and a human reason, or (None, None)."""
     caps: list[tuple[Conviction, str]] = []
-    # Cap BBB — deux causes distinctes : cap JSON explicite ou ATR synthétique.
     if (a.conviction_cap or "").upper() == "BBB":
         caps.append((Conviction.BBB, "conviction_cap=BBB"))
     if (a.atr_source or "").lower() == "synthetic":
         caps.append((Conviction.BBB, "ATR source synthétique"))
-    # High macro risk -> AA  (risk = 1 - f7_score)
     macro_risk = 1.0 - fv.get("f7_macro")
     if macro_risk >= cfg.MACRO_CAP_RISK_THRESHOLD:
         if "f7_macro" in fv.missing:
@@ -1684,15 +1721,10 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
                          "insuffisante) — cap prudentiel"))
         else:
             caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
-    # structural_risk Critical (REVERSAL_RISK) -> cap BBB : incertitude
-    # structurelle signalée sans bloquer le setup.
     if (a.market_context or {}).get("structural_risk") == "Critical":
         caps.append((Conviction.BBB, "risque structurel critique (REVERSAL_RISK)"))
-    # C7 — cap, PAS veto : la thèse peut rester valide avec une cible
-    # intermédiaire redéfinie (décision d'opérateur).
     if flags and any(f.code == "C7" for f in flags):
         caps.append((Conviction.BB, "horizon incohérent avec le calendrier (C7)"))
-    # Régime portefeuille : un cap, aucun multiplicateur de score.
     if regime is MacroRegime.PRE_POLICY_COMPRESSION:
         caps.append((Conviction.AA,
                      f"régime pré-policy (≥{cfg.MACRO_REGIME_MIN_S} releases S / "
@@ -1705,12 +1737,7 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
 
 def grade(absolute_mean: float, flags: list[Flag], cap: Optional[Conviction],
           cfg: V4Config = CONFIG) -> Conviction:
-    """Conviction AAA..B à partir du score absolu moyen et des contradictions.
-
-    base = grille(absolute_mean, k) avec k = minors + 2*majors ; le cap issu
-    d'apply_caps() ne peut que DESCENDRE base — un plafond n'est jamais un
-    laissez-passer et ne fait jamais remonter le score.
-    """
+    """Conviction AAA..B à partir du score absolu moyen et des contradictions."""
     minors = sum(1 for f in flags if f.severity == "minor")
     majors = sum(1 for f in flags if f.severity == "major")
     k = minors + 2 * majors
@@ -1750,10 +1777,10 @@ def _get_opposite_zone(a: CanonicalAsset, direction: Direction) -> Optional[Zone
     return min(zs, key=lambda z: z.distance_pct) if zs else None
 
 
-def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple[float, str]:
+def atr_for_signal(a: CanonicalAsset,
+                   ev: Optional[StructureEventView]) -> tuple[float, str]:
     if ev is not None and a.mtf:
         tf = (ev.timeframe or "").upper()
-        # Senior → ATR daily (le feed émet W1/MN sans ATR dédié).
         m = {"H1": a.mtf.atr_h1, "H4": a.mtf.atr_h4, "D1": a.mtf.atr_daily,
              "W1": a.mtf.atr_daily, "MN": a.mtf.atr_daily}
         v = m.get(tf)
@@ -1766,8 +1793,6 @@ def atr_for_signal(a: CanonicalAsset, ev: Optional[StructureEventView]) -> tuple
 def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView],
                   cfg: V4Config) -> tuple[float, str]:
     price = a.current_price or 0.0
-    # Trigger récent et collé au prix -> exécution market immédiate.
-    # (distance 0.0 est une valeur valide : test explicite contre None.)
     dist = (ev.distance_atr_multiple if (ev and ev.distance_atr_multiple is not None)
             else 999.0)
     if ev and ev.candles_elapsed <= 1 and dist <= cfg.FRESH_ATR_MAX:
@@ -1775,8 +1800,6 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView],
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
-        # La zone doit être DEVANT le prix (pull-back à venir) : sous le prix
-        # en Bullish, au-dessus en Bearish. Sinon le marché l'a déjà dépassée.
         zone_valid = (
             (direction is Direction.BULLISH and z.level < price) or
             (direction is Direction.BEARISH and z.level > price)
@@ -1785,7 +1808,6 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView],
             return z.level, "Limit"
     if a.hot_zone_primary:
         hz = a.hot_zone_primary
-        # Même garde sur hot_zone_primary.
         hz_valid = (
             (direction is Direction.BULLISH and hz.level < price) or
             (direction is Direction.BEARISH and hz.level > price)
@@ -1796,11 +1818,10 @@ def compute_entry(a: CanonicalAsset, ev: Optional[StructureEventView],
 
 
 def compute_sl(a: CanonicalAsset, entry: float, atr: float,
-               ev: Optional[StructureEventView], cfg: V4Config) -> tuple[float, float, str]:
+               ev: Optional[StructureEventView],
+               cfg: V4Config) -> tuple[float, float, str]:
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     bb_regime = ev.bb_regime if ev else "Normal"
-    # Lookup insensible à la casse (mêmes valeurs que _XCTX_BB côté f5, qui
-    # lowercase déjà ; le feed émet « Normal/Squeeze/Expansion » capitalisés).
     bb_mult = cfg.BB_REGIME_MULT.get((bb_regime or "").capitalize() or "Normal",
                                      cfg.DEFAULT_BB_MULT)
     if direction is Direction.BULLISH:
@@ -1813,9 +1834,6 @@ def compute_sl(a: CanonicalAsset, entry: float, atr: float,
     detail = f"Raw SL={sl_raw:.5f} ({bb_regime} ×{bb_mult})"
     z = a.nearest_aligned_zone
     if z and z.distance_pct <= cfg.LIMIT_ZONE_MAX_DIST:
-        # Sans borne, une zone mal placée produit un SL très large au RR
-        # formellement acceptable (le TP s'éloigne symétriquement) — d'où
-        # SL_MAX_ATR_MULT.
         max_dist = cfg.SL_MAX_ATR_MULT * atr if atr > 0 else float("inf")
         if direction is Direction.BULLISH:
             cand = z.level - 0.3 * atr
@@ -1853,10 +1871,9 @@ def compute_tp1(a: CanonicalAsset, entry: float, atr: float,
     if opp:
         dist_atr = abs(opp.level - entry) / atr if atr > 0 else float("inf")
         if dist_atr <= cfg.TP_MAX_ATR_MULT:
-            # Zone opposée proche et réaliste → l'utiliser comme TP1
             return opp.level, round(dist_atr, 2), False
-        # Zone opposée trop loin → la réserver pour TP2, utiliser synthétique pour TP1
-    tp1 = entry + cfg.TP1_ATR_MULT * atr if direction is Direction.BULLISH else entry - cfg.TP1_ATR_MULT * atr
+    tp1 = (entry + cfg.TP1_ATR_MULT * atr if direction is Direction.BULLISH
+           else entry - cfg.TP1_ATR_MULT * atr)
     return tp1, cfg.TP1_ATR_MULT, True
 
 
@@ -1865,14 +1882,12 @@ def compute_tp2(a: CanonicalAsset, entry: float, tp1: float, atr: float,
     direction = a.mtf.direction if a.mtf else Direction.NEUTRAL
     opp = [z for z in sorted(a.zones, key=lambda z: z.distance_pct)
            if _is_opposite(z, direction)]
-    # Chercher une zone opposée lointaine (> TP_MAX_ATR_MULT) pour TP2
     for z in opp:
         dist_atr = abs(z.level - entry) / atr if atr > 0 else float("inf")
         if dist_atr > cfg.TP_MAX_ATR_MULT:
-            # Zone lointaine = objectif long terme, utiliser comme TP2
             return z.level, round(dist_atr, 2), False
-    # Pas de zone lointaine → TP2 synthétique conservateur
-    tp2 = tp1 + cfg.TP2_ATR_MULT * atr if direction is Direction.BULLISH else tp1 - cfg.TP2_ATR_MULT * atr
+    tp2 = (tp1 + cfg.TP2_ATR_MULT * atr if direction is Direction.BULLISH
+           else tp1 - cfg.TP2_ATR_MULT * atr)
     return tp2, (round(abs(tp2 - entry) / atr, 2) if atr > 0 else None), True
 
 
@@ -1928,8 +1943,6 @@ def build_levels(a: CanonicalAsset, cfg: V4Config = CONFIG) -> LevelBundle:
     tp1, tp1_mult, tp1_syn = compute_tp1(a, entry, atr, cfg)
     tp2, tp2_mult, tp2_syn = compute_tp2(a, entry, tp1, atr, cfg)
     rr, rr_detail = compute_rr(entry, sl, tp1, tp2, tp1_syn, tp2_syn)
-    # Divulgation : RR dégradé si exécution au marché courant plutôt qu'au
-    # niveau limite visé. Information seulement.
     rr_if_market: Optional[float] = None
     price = a.current_price or 0.0
     if entry_type == "Limit" and price > 0:
@@ -1967,7 +1980,6 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
         setup.reject_code = "SL_SIGN"
         setup.reject_detail = "SL ≤ entry (bearish)"
         return setup
-    # Rejeter si le prix courant a déjà atteint/dépassé TP1 (zone Limit stale).
     if setup.current_price > 0 and setup.atr_effective > 0:
         atr_overshoot = abs(setup.current_price - setup.entry) / setup.atr_effective
         if setup.direction is Direction.BULLISH and setup.current_price >= setup.tp1:
@@ -1984,7 +1996,6 @@ def preflight(setup: SetupV4, cfg: V4Config = CONFIG) -> SetupV4:
                 f"(entry dépassée de +{atr_overshoot:.2f}×ATR)"
             )
             return setup
-    # Conviction minimum post-decay : élimine les signaux trop dégradés.
     min_ord = _CONVICTION_ORDINAL.get(cfg.MIN_CONVICTION, 0)
     setup_ord = _CONVICTION_ORDINAL.get(setup.conviction.value, 0)
     if setup_ord < min_ord:
@@ -2016,7 +2027,6 @@ def assign_clusters(setups: list[SetupV4], themes: MarketThemes) -> dict[str, st
         d = s.direction.value
         inv = "Bearish" if d == "Bullish" else "Bullish"
         key = None
-        # dominant currency theme drives the cluster
         if base in themes.strong and themes.strong[base] == d:
             key = f"{base}_{'strong' if d == 'Bullish' else 'weak'}"
         elif quote and quote in themes.strong and themes.strong[quote] == inv:
@@ -2046,7 +2056,6 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
     if not setups:
         return []
     assign_clusters(setups, themes)
-    # group by cluster, keep best absolute_mean as representative
     groups: dict[str, list[SetupV4]] = defaultdict(list)
     for s in setups:
         groups[s.cluster].append(s)
@@ -2062,7 +2071,6 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
         for loser in members_sorted[1:]:
             loser.reject_code = "CLUSTER_DUP"
             loser.reject_detail = f"Représentant cluster {key} = {rep.symbol}"
-    # rank representatives, then apply per-currency exposure cap, then top-N
     ranked = sorted(
         representatives,
         key=lambda x: (-_CONVICTION_ORDINAL[x.conviction.value],
@@ -2073,9 +2081,6 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
     kept: list[SetupV4] = []
     kept_meta: list[tuple[str, str, str, set[str], Direction]] = []
 
-    # reached_max remplace un `break` sec : les représentants au-delà de
-    # MAX_SETUPS reçoivent un étiquetage explicite (MAX_SETUPS_REACHED) au lieu
-    # de tomber dans le défaut "CLUSTER_DUP" de _eliminated_from_setups().
     reached_max = False
     for s in ranked:
         if reached_max:
@@ -2094,9 +2099,6 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
             s.cal_note = (s.cal_note + " [capped: exposition devise]").strip()
             continue
 
-        # Cap corrélation UNIQUEMENT pour les paires sans devise commune
-        # (les paires à devise commune sont déjà gouvernées par
-        # MAX_EXPOSURE_PER_CCY ; ne pas durcir le seuil implicitement).
         s_groups = corr_idx.get(s.symbol, set())
         corr_hit: Optional[str] = None
         if s_groups:
@@ -2130,21 +2132,16 @@ def diversify(setups: list[SetupV4], themes: MarketThemes,
 # ════════════════════════════════════════════════════════════════════════════
 def _build_universe(assets: Mapping[str, CanonicalAsset], cal: CalendarSets,
                     cfg: V4Config) -> Universe:
-    # Audit R5 : un silence calendaire sur une devise n'est pas une absence de
-    # risque — le feed peut ne pas couvrir ces devises cette semaine.
     all_ccy: set[str] = set()
     for a in assets.values():
         all_ccy.add(a.base)
         if a.quote:
             all_ccy.add(a.quote)
-    # Couverture = devise présente dans le flux (cal.covered_currencies), pas
-    # « présente dans une fenêtre » — même définition que la bannière de rendu.
-    # Jambes-instruments (XAU, DE30…) exclues : pas de calendrier propre.
     _cov_set = {str(c).upper() for c in cal.covered_currencies}
     uncovered = {c for c in (all_ccy - _cov_set) if c in _DESK_CURRENCIES}
     if uncovered:
         logger.info(
-            "R5 devises sans couverture calendaire (f7_macro retourne 1.0 par défaut): %s",
+            "R5 devises sans couverture calendaire (f7_macro fail-closed ou défaut): %s",
             sorted(uncovered),
         )
 
@@ -2179,14 +2176,22 @@ def _build_universe(assets: Mapping[str, CanonicalAsset], cal: CalendarSets,
     return Universe(passed=passed, rejected=rejected)
 
 
-def _compute_cal_status(a: CanonicalAsset, cal: Optional[CalendarSets]) -> tuple[CalStatus, str]:
+def _compute_cal_status(a: CanonicalAsset,
+                        cal: Optional[CalendarSets]) -> tuple[CalStatus, str]:
     if cal is None:
         return CalStatus.OK, ""
     sides = {a.base, (a.quote or "")}
     hit_black = sides & cal.suspended_ccy
     if hit_black:
-        names = [f"{e.currency} {e.event_name}" for e in cal.blackout if e.currency in hit_black]
-        return CalStatus.BLACKOUT, "; ".join(names[:3])
+        scoped = [e for e in cal.blackout if e.currency in hit_black]
+        labels = []
+        for grp in group_releases(scoped, tiers=(EventTier.S, EventTier.A,
+                                                 EventTier.B, EventTier.NONE)):
+            head = release_headline(grp)
+            extra = len(grp) - 1
+            labels.append(f"{head.currency} {head.event_name}"
+                          + (f" +{extra}" if extra else ""))
+        return CalStatus.BLACKOUT, "; ".join(labels[:3])
     hit_prox = sides & cal.proximity_ccy
     if hit_prox:
         return CalStatus.PROXIMITY, ", ".join(sorted(hit_prox))
@@ -2203,7 +2208,8 @@ def _scenario_hint(a: CanonicalAsset, lv: LevelBundle) -> str:
     age = int(a.mtf.age_d1) if (a.mtf and age_known) else 0
     if lv.trigger is not None:
         ev = lv.trigger
-        parts.append(f"CHoCH {ev.timeframe} {ev.candles_elapsed}c score={ev.confluence_score:.0f}")
+        parts.append(f"CHoCH {ev.timeframe} {ev.candles_elapsed}c "
+                     f"score={ev.confluence_score:.0f}")
     elif a.hot_zone_primary:
         parts.append("Hot Zone")
     if not age_known:
@@ -2233,15 +2239,16 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
         lv = build_levels(a)
     parts = [f"Score absolu {fv.absolute_mean:.2f}"]
     top = sorted(fv.present, key=lambda n: -fv.get(n))[:3]
-    parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}" for n in top))
+    parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}"
+                                       for n in top))
     if lv.trigger:
         ev = lv.trigger
-        parts.append(f"trigger {ev.direction.value} {ev.timeframe} ({ev.session}, {ev.bb_regime})")
+        parts.append(f"trigger {ev.direction.value} {ev.timeframe} "
+                     f"({ev.session}, {ev.bb_regime})")
     if a.mtf:
         tb = themes.bonus_for(a.base, a.quote, a.mtf.direction)
         if tb > 0.6:
             parts.append(f"thème favorable ({tb:.2f})")
-    # Enrichissement market_context (lecture seule, sans impact scoring).
     ctx = a.market_context or {}
     market_state = ctx.get("market_state")
     if market_state and market_state not in ("DATA_INCOMPLETE", "RANGE_COMPRESSION"):
@@ -2255,25 +2262,18 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
 
 
 def _best_choch_info(a: CanonicalAsset) -> Optional[str]:
-    """Retourne un label court pour le meilleur CHoCH disponible sur l'asset,
-    qu'il soit aligné avec la direction du trade ou non.
-
-    Format : "<TF> <Dir> <Score> (<candles>c)"
-    Ex : "H4 Bearish 85 (3c)"  ou  "D1 Bullish 65 (2c) ⚠contra"
-
-    ⚠contra est ajouté si la direction du CHoCH est contraire à la direction du trade.
-    Retourne None si aucun CHoCH Fresh présent.
-    """
+    """Label court pour le meilleur CHoCH disponible, aligné ou non."""
     if not a.structure_events:
         return None
     fresh = [ev for ev in a.structure_events if ev.status.lower() == "fresh"]
     if not fresh:
         return None
-    # Trier : aligné d'abord, puis par confluence_score desc
     trade_dir = a.mtf.direction if a.mtf else None
+
     def _sort_key(ev: StructureEventView) -> tuple:
         aligned = int(_dir_eq(ev.direction, trade_dir)) if trade_dir else 0
         return (-aligned, -(ev.confluence_score or 0))
+
     best = sorted(fresh, key=_sort_key)[0]
     tf = best.timeframe or "?"
     score = int(best.confluence_score or 0)
@@ -2292,7 +2292,8 @@ def _invalidation_structure(a: CanonicalAsset, cfg: V4Config) -> str:
     if tf not in cfg.HWA_WEIGHTS:
         tf = "D1"
     txt = f"CHoCH {opp.value} confirmé sur {tf} ou timeframe plus senior"
-    cur = ((a.market_context or {}).get("structure_events_summary") or {}).get("highest_counter_tf")
+    cur = ((a.market_context or {}).get("structure_events_summary") or {}).get(
+        "highest_counter_tf")
     if cur:
         txt += f" — counter déjà présent sur {cur}"
     return txt
@@ -2300,8 +2301,7 @@ def _invalidation_structure(a: CanonicalAsset, cfg: V4Config) -> str:
 
 def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
                                  cfg: V4Config) -> dict[str, str]:
-    """P1-D — sortie pure. Toutes les composantes sont déjà calculées ailleurs ;
-    aucune valeur nouvelle n'est estimée."""
+    """P1-D — sortie pure. Toutes les composantes sont déjà calculées ailleurs."""
     if clock is None:
         return {}
     if horizon_days is not None and horizon_days > 0:
@@ -2316,8 +2316,6 @@ def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
         sides = {a.base, (a.quote or "")}
         cov = set(cal.covered_currencies or ()) if cal is not None else set()
         no_data = sorted(c for c in sides if cov and c not in cov)
-        # Paire non concernée par le calendrier (devise sans donnée) : rien à
-        # publier sur ce champ plutôt qu'une phrase sur l'absence de données.
         ev_txt = "" if no_data else "aucun event S/A sur base ou quote dans l'horizon"
     return {
         "price": f"{lv.sl:.5f} (stop)",
@@ -2372,14 +2370,15 @@ def _make_draft(a: CanonicalAsset, fv: FactorVector,
         htf_aligned=_htf_aligned(a),
         sl_detail=lv.sl_detail, rr_detail=lv.rr_detail,
         factor_scores=fs,
-        current_price=(a.current_price or 0.0),   # snapshot validé par preflight
-        asset_class=a.asset_class,                # propagé depuis le JSON merge
+        current_price=(a.current_price or 0.0),
+        asset_class=a.asset_class,
         age_d1=age_val, age_known=age_known,
         rr_if_market=lv.rr_if_market,
         horizon_days=(round(h_days, 2) if h_days is not None else None),
         horizon_event=ev_label,
         horizon_event_days=(round(ev_days, 2) if ev_days is not None else None),
-        invalidation=_build_invalidation_contract(a, lv, cal, clock, h_days, ev_label, cfg),
+        invalidation=_build_invalidation_contract(a, lv, cal, clock, h_days,
+                                                  ev_label, cfg),
     )
 
 
@@ -2401,12 +2400,9 @@ def _pipeline_factors_and_grades(
         lv = build_levels(a, config)
         lv_cache[a.symbol] = lv
         drafts.append(_make_draft(a, fv, cal_sets, config, lv, clock))
-    # Quantiles sur absolute_mean BRUT : un rang relatif ne doit pas être
-    # biaisé par le decay.
     quantiles = compute_quantiles(vectors)
     for s in drafts:
         s.factor_scores.quantile = round(quantiles.get(s.symbol, 0.0), 4)
-    # alpha decay + contradictions + grade
     asset_by_sym = {a.symbol: a for a in universe.passed}
     fv_by_sym = {v.symbol: v for v in vectors}
     known_ages = [s.age_d1 for s in drafts if s.age_known]
@@ -2418,26 +2414,25 @@ def _pipeline_factors_and_grades(
     for s in drafts:
         a = asset_by_sym[s.symbol]
         fv = fv_by_sym[s.symbol]
-        # Alpha decay : age_d1 vient du setup (déjà extrait de mtf).
         if s.age_known:
             decay, decay_src = _alpha_decay_factor(s.age_d1, config), "age"
         else:
             decay, decay_src = unknown_decay, unknown_src
-        raw_mean = s.factor_scores.absolute_mean        # pré-decay (audit)
+        raw_mean = s.factor_scores.absolute_mean
         decayed_mean = _clamp01(raw_mean * decay)
         s.factor_scores.absolute_mean_raw = round(raw_mean, 4)
         s.factor_scores.decay_factor = round(decay, 4)
         s.factor_scores.absolute_mean = round(decayed_mean, 4)
         s.factor_scores.decay_source = decay_src
-        flags = detect_contradictions(a, fv, themes, cal_sets, config,
-                                      now=clock.now_utc,
-                                      horizon=(s.horizon_days, s.horizon_event_days, s.horizon_event))
-        # C11 câblé ici (et non dans detect_contradictions) : il a besoin de
-        # s.entry_type, connu seulement depuis _make_draft.
+        flags = detect_contradictions(
+            a, fv, themes, cal_sets, config,
+            now=clock.now_utc,
+            horizon=(s.horizon_days, s.horizon_event_days, s.horizon_event))
         stale_flag = _c11_stale_price_market_entry(a, s.entry_type)
         if stale_flag is not None:
             flags.append(stale_flag)
-        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail) for f in flags]
+        s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail)
+                   for f in flags]
         cap, cap_reason = apply_caps(a, fv, config, flags=flags, regime=regime)
         if cap_reason:
             s.capped_reason = cap_reason
@@ -2452,7 +2447,7 @@ def _pipeline_rank_and_diversify(
     config: V4Config,
     correlation_groups: Optional[dict] = None,
 ) -> tuple[list[SetupV4], list[SetupV4], list[SetupV4]]:
-    """Etapes 8-10 : preflight, rank, diversify. Retourne (final, preflight_rejects, ranked)."""
+    """Etapes 8-10 : preflight, rank, diversify."""
     for s in drafts:
         preflight(s, config)
     valid = [s for s in drafts if s.reject_code is None]
@@ -2469,8 +2464,7 @@ def _pipeline_collect_eliminated(
     final: list[SetupV4],
     cal: Optional[CalendarSets] = None,
 ) -> list[Eliminated]:
-    """Etape 11 : collecte des actifs éliminés (gates + preflight + non-représentants)."""
-    # cal transmis pour renseigner le vrai cal_status des rejets d'univers.
+    """Etape 11 : collecte des actifs éliminés."""
     eliminated = _collect_eliminated(universe, cal)
     eliminated.extend(_eliminated_from_setups(preflight_rejects))
     final_syms = {s.symbol for s in final}
@@ -2486,11 +2480,7 @@ def run_pipeline(
     pdf_path: Optional[str] = None,
     config: V4Config = CONFIG,
 ) -> str:
-    """Pipeline complet : 2 JSON en entrée, HTML (et PDF optionnel) en sortie.
-
-    Écrit output_path si fourni, pdf_path si fourni ; retourne toujours le HTML.
-    Aucun fichier n'est créé sans chemin explicitement demandé.
-    """
+    """Pipeline complet : 2 JSON en entrée, HTML (et PDF optionnel) en sortie."""
     # 1 — ingestion
     meta, assets, correlation_groups = load_merged(merged_path)
     calendar_data = load_calendar(calendar_json_path, desk_generated_at=meta.generated_at)
@@ -2528,30 +2518,29 @@ def run_pipeline(
                          cal_time_detail=calendar_data.time_audit_detail,
                          cal_feed_truncated=calendar_data.feed_horizon_truncated,
                          cal_feed_detail=calendar_data.feed_coverage_detail,
-                         cal_stale=calendar_data.stale,
-                         cal_stale_detail=calendar_data.stale_detail,
-                         cal_merge_stale=calendar_data.merge_stale,
-                         cal_merge_stale_detail=calendar_data.merge_stale_detail,
+                         cal_stale_h=calendar_data.stale_age_h,
+                         cal_merge_stale_h=calendar_data.merge_stale_age_h,
                          cal_covered_currencies=calendar_data.covered_currencies,
                          cal_source_stale=calendar_data.source_stale,
                          cal_source_warnings=calendar_data.source_warnings,
+                         cal_source_quality=calendar_data.source_quality,
+                         cal_reachable=calendar_data.reachable,
                          cal_feed_end_utc=calendar_data.feed_end_utc,
                          cal_feed_horizon_h=calendar_data.feed_horizon_h,
                          version=__version__)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html)
-    # 12b — PDF natif (optionnel, jamais bloquant). Sans WeasyPrint, repli :
-    # le HTML calibré est écrit à côté du .pdf demandé.
+    # 12b — PDF natif (optionnel, jamais bloquant).
     if pdf_path:
-        _fb = pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf") else pdf_path + ".html"
+        _fb = (pdf_path[:-4] + ".html" if pdf_path.lower().endswith(".pdf")
+               else pdf_path + ".html")
         render_pdf(html, pdf_path, fallback_html=_fb)
     return html
 
 
-def _collect_eliminated(universe: Universe, cal: Optional[CalendarSets] = None) -> list[Eliminated]:
-    # cal_status réel via _compute_cal_status — jamais un "OK" par défaut qui
-    # masquerait un PROXIMITY/WATCH/BLACKOUT mesurable.
+def _collect_eliminated(universe: Universe,
+                        cal: Optional[CalendarSets] = None) -> list[Eliminated]:
     out: list[Eliminated] = []
     for asset, code, detail in universe.rejected:
         m = asset.mtf
@@ -2588,14 +2577,14 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     with open(merged_path, encoding="utf-8") as f:
         raw = json.load(f)
     meta = MergeMeta.model_validate(raw.get("meta", {}))
-    # Vérification de version du schéma merge (recommandation non bloquante).
     if meta.version:
         try:
             min_v = MIN_MERGE_SCHEMA
             min_version = ".".join(str(x) for x in min_v)
             meta_v = tuple(int(x) for x in meta.version.split(".")[:3])
             if meta_v < min_v:
-                logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)", meta.version, min_version)
+                logger.warning("Schéma merge obsolète: %s (minimum recommandé: %s)",
+                               meta.version, min_version)
         except (ValueError, AttributeError):
             logger.warning("Version schéma non parseable: %s", meta.version)
     else:
@@ -2606,13 +2595,8 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
             assets[sym] = CanonicalAsset.model_validate(a)
         except Exception as exc:
             logger.warning("asset %s skipped: %s", sym, exc)
-    # correlation_groups : passage brut (dict), jamais bloquant si absent ou
-    # malformé — donnée d'appoint pour le comité aval, pas une entrée de scoring.
     raw_corr = raw.get("correlation_groups")
     correlation_groups: dict = raw_corr if isinstance(raw_corr, dict) else {}
-    # hot_zones (racine) : le producer émet une liste plate par symbole pendant
-    # que le champ par actif peut rester null. Sans propagation, le JSON
-    # fournirait la donnée et le moteur la jetterait (hot_zone_primary mort).
     _hz_first: dict[str, dict] = {}
     for _hz in (raw.get("hot_zones") or []):
         if isinstance(_hz, dict) and isinstance(_hz.get("symbol"), str):
@@ -2623,7 +2607,6 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
                 _a.hot_zone_primary = ZoneView.model_validate(_hz_first[_sym])
             except Exception as exc:
                 logger.warning("hot_zone %s ignorée: %s", _sym, exc)
-    # diagnostics / scanners / cohérence meta-signals : visibilité, zéro décision.
     if meta.scanners_unknown:
         logger.warning("merge: %d scanner(s) inconnu(s) au registre producer",
                        meta.scanners_unknown)
@@ -2632,7 +2615,8 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
         _sev: Counter = Counter(
             str(d.get("severity", "?")).lower() for d in diags if isinstance(d, dict))
         for d in diags:
-            if isinstance(d, dict) and str(d.get("severity", "")).lower() in ("error", "warning"):
+            if isinstance(d, dict) and str(d.get("severity", "")).lower() in ("error",
+                                                                              "warning"):
                 logger.warning("merge diagnostic [%s/%s] %s", d.get("stage"),
                                d.get("code"), str(d.get("message"))[:200])
         if _sev:
@@ -2644,7 +2628,21 @@ def load_merged(merged_path: str) -> tuple[MergeMeta, dict[str, CanonicalAsset],
     return meta, assets, correlation_groups
 
 
-def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional[datetime] = None) -> CalendarData:
+def _extract_covered_currencies(meta: Mapping[str, Any]) -> list[str]:
+    """Couverture déclarée. Le wrapper Module 04 expose selon les versions
+    `filters_applied` ou `ui_filters_applied` — lire une seule des deux clés
+    fait silencieusement retomber sur le repli par déduction."""
+    for key in ("filters_applied", "ui_filters_applied"):
+        blk = meta.get(key)
+        if isinstance(blk, dict):
+            cur = blk.get("currencies")
+            if isinstance(cur, list) and cur:
+                return sorted({str(c).upper() for c in cur})
+    return []
+
+
+def load_calendar(calendar_json_path: Optional[str],
+                  desk_generated_at: Optional[datetime] = None) -> CalendarData:
     """Charge calendar.json — format wrapper Module 04 ou CalendarData natif.
 
     Priorité de lecture des events (wrapper) :
@@ -2654,16 +2652,10 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
     Deux audits temporels DISTINCTS et non confondus :
       - P0-A (fuseau / cohérence interne) : `hours_until` vs `datetime_utc`
         rapportés à la propre horloge du flux (`metadata.generated_at_utc`).
-        L'offset médian se simplifie algébriquement en `ref − cal_gen` : seul
-        un `ref` égal à l'horloge du flux teste la cohérence INTERNE du
-        calendrier ; avec un autre `ref`, on ne mesurerait qu'un écart
-        d'horloges. Un écart systématique => `time_degraded` (fenêtres
-        élargies, fail-closed).
-      - Fraîcheur croisée Desk vs flux (`desk_generated_at` = merge
-        `meta.generated_at`) : deux cas OPPOSÉS étiquetés séparément,
-        CALENDAR_STALE (calendrier antérieur au Desk) et MERGE_STALE (snapshot
-        de marché antérieur au calendrier). Aucun de ces flags ne modifie une
-        fenêtre de blackout — affichage et audit seulement.
+      - Fraîcheur croisée Desk vs flux (`desk_generated_at`) : CALENDAR_STALE
+        (calendrier antérieur au Desk) et MERGE_STALE (snapshot de marché
+        antérieur au calendrier). Aucun de ces deux flags ne modifie une fenêtre
+        de blackout — audit et affichage seulement.
     """
     if not calendar_json_path:
         return CalendarData()
@@ -2672,22 +2664,16 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
 
     raw_dict: dict = json.loads(raw)
 
-    # Format wrapper Module 04 (« metadata » à la racine) vs CalendarData natif.
     is_wrapper = "metadata" in raw_dict
-    # Initialisé avant la branche : l'audit de troncature lit gen_at sur les
-    # deux formats (pas de NameError sur le chemin natif).
     gen_at: Optional[datetime] = None
 
     if is_wrapper:
-        # events_engine en priorité (passés 72h + futurs), fallback events
-        # (UI filtré, parfois vide en fin de semaine).
         events_raw: list[dict] = (
             raw_dict.get("events_engine")
             or raw_dict.get("events", [])
         )
         meta = raw_dict.get("metadata", {})
 
-        # Logger explicitement si la liste est vide (pas de silent failure).
         if not events_raw:
             logger.warning(
                 "calendar.json chargé avec 0 events "
@@ -2705,9 +2691,6 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 logger.debug("calendar event skipped: %s", exc)
 
         gen_at = _parse_iso_utc(meta.get("generated_at_utc"))
-        # Référence = gen_at (propre horloge du flux) : test de cohérence
-        # interne (fuseau/troncature), indépendant de l'écart de génération
-        # avec le Desk — cf. docstring et CALENDAR_STALE ci-dessous.
         off, conc, tot = audit_calendar_time_consistency(events_raw, gen_at)
         if tot and (conc / tot) >= CAL_TIME_MIN_RATIO and abs(off) > CAL_TIME_TOL_H:
             time_degraded = True
@@ -2719,10 +2702,6 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
         else:
             time_degraded, time_offset, time_detail = False, 0.0, ""
 
-        # Fraîcheur croisée Desk vs flux — deux conditions OPPOSÉES, jamais
-        # confondues : un calendrier plus récent que le merge = MERGE_STALE
-        # (snapshot périmé), pas CALENDAR_STALE. Affichage seul ; aucune
-        # fenêtre de blackout n'est modifiée ici.
         stale, stale_age_h, stale_detail = False, 0.0, ""
         merge_stale, merge_stale_age_h, merge_stale_detail = False, 0.0, ""
         if desk_generated_at and gen_at:
@@ -2732,8 +2711,7 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 stale_age_h = age_h
                 stale_detail = (
                     f"calendrier antérieur au Desk de {age_h:.2f}h "
-                    f"(flux: {gen_at:%H:%M:%S} UTC, Desk: {desk_generated_at:%H:%M:%S} UTC) "
-                    f"— données calendaires potentiellement périmées"
+                    f"(flux: {gen_at:%H:%M:%S} UTC, Desk: {desk_generated_at:%H:%M:%S} UTC)"
                 )
                 logger.warning("CALENDAR_STALE : %s", stale_detail)
             elif age_h < -MERGE_STALE_TOL_H:
@@ -2741,92 +2719,224 @@ def load_calendar(calendar_json_path: Optional[str], desk_generated_at: Optional
                 merge_stale_age_h = -age_h
                 merge_stale_detail = (
                     f"snapshot de marché antérieur au calendrier de {-age_h:.2f}h "
-                    f"({-age_h * 60:.0f} min) — merge : {desk_generated_at:%H:%M:%S} UTC, "
-                    f"calendrier : {gen_at:%H:%M:%S} UTC. Prix, ATR, RSI et horloge de "
-                    f"scoring sont ceux du merge ; le calendrier est plus récent. "
-                    f"Aucune fenêtre de blackout modifiée."
+                    f"(merge : {desk_generated_at:%H:%M:%S} UTC, "
+                    f"calendrier : {gen_at:%H:%M:%S} UTC)"
                 )
                 logger.warning("MERGE_STALE : %s", merge_stale_detail)
 
-        _filters = meta.get("filters_applied") or {}
-        _cov_raw = _filters.get("currencies") if isinstance(_filters, dict) else None
-        covered = (sorted({str(c).upper() for c in _cov_raw})
-                   if isinstance(_cov_raw, list) else [])
+        covered = _extract_covered_currencies(meta)
 
-        data = CalendarData(events=cal_events,
-                            time_degraded=time_degraded,
-                            time_offset_hours=time_offset,
-                            time_audit_detail=time_detail,
-                            stale=stale,
-                            stale_age_h=stale_age_h,
-                            stale_detail=stale_detail,
-                            merge_stale=merge_stale,
-                            merge_stale_age_h=merge_stale_age_h,
-                            merge_stale_detail=merge_stale_detail,
-                            covered_currencies=covered,
-                            source_stale=bool(meta.get("is_stale", False)),
-                            source_warnings=[str(w).strip() for w in (meta.get("warnings") or [])
-                                             if str(w).strip()],
-                            reachable=bool(meta.get("reachable", True)),
-                            feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False)),
-                            feed_horizon_h=meta.get("feed_horizon_h"),
-                            feed_coverage_detail=meta.get("feed_coverage_detail", ""))
+        data = CalendarData(
+            events=cal_events,
+            time_degraded=time_degraded,
+            time_offset_hours=time_offset,
+            time_audit_detail=time_detail,
+            stale=stale,
+            stale_age_h=stale_age_h,
+            stale_detail=stale_detail,
+            merge_stale=merge_stale,
+            merge_stale_age_h=merge_stale_age_h,
+            merge_stale_detail=merge_stale_detail,
+            covered_currencies=covered,
+            source_stale=bool(meta.get("is_stale", False)),
+            source_warnings=[str(w).strip() for w in (meta.get("warnings") or [])
+                             if str(w).strip()],
+            source_quality=str(meta.get("quality_status") or "VALID"),
+            source_quality_score=_safe_float(meta.get("data_quality_score")),
+            supports_actual=bool(meta.get("supports_actual", True)),
+            reachable=bool(meta.get("reachable", True)),
+            feed_horizon_truncated=bool(meta.get("feed_horizon_truncated", False)),
+            feed_horizon_h=meta.get("feed_horizon_h"),
+            feed_coverage_detail=meta.get("feed_coverage_detail", ""),
+        )
     else:
-        # Format CalendarData natif : validation directe.
         data = CalendarData.model_validate_json(raw)
 
-    if data.source_stale or data.source_warnings:
-        logger.warning("SOURCE CALENDRIER signalée : %s",
-                       ("is_stale=true" if data.source_stale else "")
-                       + (" ; " if data.source_stale and data.source_warnings else "")
-                       + " ; ".join(data.source_warnings))
+    # Journalisation graduée : un avertissement de CAPACITÉ n'est pas un
+    # incident de fraîcheur. Seul l'inattendu remonte en WARNING.
+    _hard_warnings = [w for w in data.source_warnings
+                      if w not in _BENIGN_SOURCE_WARNINGS]
+    if data.source_stale or _hard_warnings or data.source_quality.upper() != "VALID":
+        logger.warning(
+            "SOURCE CALENDRIER : %s",
+            " ; ".join(filter(None, [
+                "is_stale=true" if data.source_stale else "",
+                (f"quality_status={data.source_quality}"
+                 if data.source_quality.upper() != "VALID" else ""),
+                " ; ".join(_hard_warnings),
+            ])),
+        )
+    elif data.source_warnings:
+        logger.info("source calendrier — capacités déclarées : %s",
+                    " ; ".join(data.source_warnings))
+    if not data.supports_actual:
+        logger.info("source sans résultats publiés (supports_actual=false) — "
+                    "mesure de surprise post-event désactivée")
 
-    # Couverture effective démontrée par le flux quand la métadonnée de filtre
-    # est absente (wrapper) ou le champ omis (CalendarData natif) — jamais une
-    # couverture nulle affirmée à tort. Précède tout appel à bucket().
     if not data.covered_currencies and data.events:
         data.covered_currencies = sorted({ev.currency for ev in data.events})
 
     # ── Horizon réel du flux vs fenêtre WATCH ────────────────────────────────
-    # Aucune décision modifiée : rend visible une limite de couverture qui
-    # était silencieuse (indistinguable d'une absence de risque). Flux vide ou
-    # non accessible -> fail-closed (branche elif ci-dessous).
     if data.events:
         _ref = gen_at if (is_wrapper and gen_at is not None) else data.parsed_at
-        # Défensif : parsed_at peut être naïf (CalendarData natif mal formé).
         if _ref.tzinfo is None:
             _ref = _ref.replace(tzinfo=timezone.utc)
         _feed_end = max(ev.datetime_utc for ev in data.events)
         _horizon_h = (_feed_end - _ref).total_seconds() / 3600.0
-        # Borne réelle + horizon exposés pour l'export JSON calendar-coverage.
         data.feed_end_utc = _feed_end
         data.feed_horizon_h = _horizon_h
         if _horizon_h < WATCH_MAX_H:
             data.feed_horizon_truncated = True
             data.feed_coverage_detail = (
                 f"couverture du flux : {_ref:%d/%m %H:%M} → {_feed_end:%d/%m %H:%M} UTC "
-                f"({_horizon_h:+.0f}h) < fenêtre WATCH {WATCH_MAX_H:.0f}h — attendu "
-                f"pour un flux hebdomadaire. Au-delà du {_feed_end:%d/%m %H:%M} UTC, "
-                f"l'absence d'événement au calendrier n'est PAS une absence de "
-                f"risque : F7 MACRO reste en fail-closed et le cap prudentiel "
-                f"s'applique"
+                f"({_horizon_h:+.0f}h) < fenêtre WATCH {WATCH_MAX_H:.0f}h"
             )
-            logger.warning("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
+            logger.info("FEED-HORIZON TRONQUÉ : %s", data.feed_coverage_detail)
     elif is_wrapper:
-        # Flux vide ou non accessible -> fail-closed broadcast.
         data.feed_horizon_truncated = True
         data.feed_coverage_detail = (
             "flux calendaire vide ou non accessible — risque NON écarté, "
-            "pas risque nul (attendre une fenêtre complète ou vérifier la source)"
+            "pas risque nul"
         )
-        logger.warning("FEED-TRONCU OU VIDE : %s", data.feed_coverage_detail)
+        logger.warning("FEED TRONQUÉ OU VIDE : %s", data.feed_coverage_detail)
 
     data.raw_html_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return data
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 16 — RENDER  (template HTML calibré écran + print A4)
+# SECTION 16 — BRIEFING CALENDAIRE  (couche d'affichage, aucune décision)
+# ════════════════════════════════════════════════════════════════════════════
+def _consensus_str(ev: CalendarEvent) -> str:
+    """« consensus vs précédent ». Les chaînes d'affichage priment (unités et
+    signes conservés) ; repli sur les champs numériques Module 04."""
+    f = (ev.forecast or "").strip()
+    p = (ev.previous or "").strip()
+    if not f and ev.forecast_value is not None:
+        f = f"{ev.forecast_value:g}"
+    if not p and ev.previous_value is not None:
+        p = f"{ev.previous_value:g}"
+    if f and p:
+        return f"{f} vs {p}"
+    return f or ""
+
+
+def build_calendar_briefing(
+    setups: list[SetupV4],
+    calendar: Optional[CalendarSets],
+    clock: Clock,
+    cfg: V4Config = CONFIG,
+    *,
+    covered: Optional[list[str]] = None,
+    feed_end_utc: Optional[datetime] = None,
+    merge_stale_h: float = 0.0,
+    cal_stale_h: float = 0.0,
+    source_stale: bool = False,
+    source_warnings: Optional[list[str]] = None,
+    source_quality: str = "VALID",
+    reachable: bool = True,
+    time_degraded: bool = False,
+    time_detail: str = "",
+) -> dict[str, Any]:
+    """Briefing calendaire orienté décision.
+
+    Aucune donnée n'est estimée ici : regroupement par communiqué, tri
+    chronologique, et mise en regard de l'horizon de cible des setups publiés.
+    Ce qui est constaté mais sans conséquence sur une fenêtre de risque descend
+    en note d'intégrité ; seul l'actionnable remonte en bandeau.
+    """
+    out: dict[str, Any] = {
+        "events": [], "context": [], "integrity": "", "alert": "",
+        "window": "", "has_crossing": False, "n_hidden": 0,
+    }
+    covered = [str(c).upper() for c in (covered or [])]
+    source_warnings = source_warnings or []
+
+    if calendar is None:
+        out["alert"] = "aucun calendrier chargé — risque événementiel NON écarté"
+        return out
+
+    now = clock.now_utc
+    horizon = list(calendar.blackout) + list(calendar.proximity) + list(calendar.watch)
+
+    # Book publié : jambes exposées et horizon de cible par symbole.
+    legs: dict[str, set[str]] = defaultdict(set)
+    horizon_d: dict[str, float] = {}
+    for s in setups:
+        b, q = _split_symbol(s.symbol)
+        for leg in (b, q):
+            if leg:
+                legs[leg].add(s.symbol)
+        horizon_d[s.symbol] = s.horizon_days or 0.0
+
+    rows: list[dict[str, Any]] = []
+    context: list[dict[str, Any]] = []
+    for grp in group_releases(horizon):
+        head = release_headline(grp)
+        when = min(e.datetime_utc for e in grp)
+        days = (when - now).total_seconds() / 86400.0
+        if days < 0:
+            continue
+        exposed = sorted(legs.get(head.currency, ()))
+        row = {
+            "when": f"{when:%d/%m %H:%M}Z",
+            "days": round(days, 1),
+            "currency": head.currency,
+            "tier": _TIER_LABEL[head.tier],
+            "label": head.event_name,
+            "extra": len(grp) - 1,
+            "consensus": _consensus_str(head),
+            "symbols": exposed,
+            # Cible postérieure à la publication : la position traverse
+            # l'événement. C'est la seule ligne qui appelle une décision.
+            "crossing": tuple(s for s in exposed if horizon_d.get(s, 0.0) > days),
+        }
+        (rows if exposed else context).append(row)
+
+    out["events"] = rows
+    ctx_s = [r for r in context if r["tier"] == "S"]
+    out["context"] = ctx_s[:cfg.CAL_BRIEF_CONTEXT_MAX]
+    out["n_hidden"] = len(context) - len(out["context"])
+    out["has_crossing"] = any(r["crossing"] for r in rows)
+    if feed_end_utc:
+        out["window"] = (f"couvert jusqu'au {feed_end_utc:%d/%m %H:%M}Z"
+                         + (f" · {', '.join(covered)}" if covered else ""))
+
+    # ── Intégrité : constatée, non commentée ────────────────────────────────
+    parts: list[str] = []
+    if merge_stale_h > 0:
+        parts.append(f"merge antérieur au calendrier de {merge_stale_h * 60:.0f} min "
+                     f"(fenêtres inchangées)")
+    if cal_stale_h > 0:
+        parts.append(f"calendrier antérieur au merge de {cal_stale_h * 60:.0f} min")
+    if covered:
+        unc = sorted(c for c in legs if c in _DESK_CURRENCIES and c not in covered)
+        if unc:
+            parts.append(f"hors flux : {', '.join(unc)} — silence non interprétable")
+    if "SOURCE_DOES_NOT_PROVIDE_ACTUAL" in source_warnings:
+        parts.append("résultats publiés non fournis par la source (attendu sur ce flux)")
+    out["integrity"] = " · ".join(parts)
+
+    # ── Alerte : uniquement ce qui change une décision ──────────────────────
+    hard = [w for w in source_warnings if w not in _BENIGN_SOURCE_WARNINGS]
+    if source_quality and source_quality.upper() != "VALID":
+        hard.insert(0, f"qualité de source déclarée {source_quality}")
+    if not horizon:
+        hard.insert(0, "aucun événement à haut impact reçu — risque NON écarté")
+    if not reachable:
+        hard.insert(0, "flux calendaire non joignable")
+    if source_stale:
+        hard.insert(0, "source marquée périmée (is_stale)")
+    if time_degraded:
+        hard.insert(0, "incohérence de fuseau — résolution intraday non fiable, "
+                       "fenêtres élargies par sécurité"
+                       + (f" ({time_detail})" if time_detail else ""))
+    out["alert"] = " · ".join(hard)
+    return out
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 17 — RENDER  (template HTML calibré écran + print A4)
 # ════════════════════════════════════════════════════════════════════════════
 # Pagination : pas de saut forcé par carte ; break-inside évite de couper une
 # carte ; en-tête riche en page 1 uniquement ; la section « Éliminés » démarre
@@ -2861,6 +2971,21 @@ body{background:var(--bg);color:var(--body);font-family:var(--sans);font-size:12
 .banner{background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red-tx);border-radius:var(--r);padding:9px 14px;margin-bottom:12px;font-family:var(--mono);font-size:10.5px;font-weight:600}
 .banner.warn{background:#fff7e6;border-color:#f0c98a;color:#7a4a00}
 .banner.info{background:var(--royal-light);border-color:var(--royal-dim);color:var(--sec);font-weight:500}
+/* ── Briefing calendaire ── */
+.cal-brief{border:1px solid var(--border);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.cal-brief-hdr{display:flex;gap:10px;align-items:baseline;padding:6px 12px;background:var(--royal-light);border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;font-weight:700;color:var(--royal);letter-spacing:.08em;text-transform:uppercase}
+.cal-brief-hdr .win{margin-left:auto;font-weight:500;text-transform:none;letter-spacing:0;color:var(--sec)}
+.cal-tbl{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px}
+.cal-tbl td{padding:4px 12px;border-bottom:1px solid var(--border);background:var(--white)}
+.cal-tbl tr:last-child td{border-bottom:none}
+.cal-when{white-space:nowrap;font-weight:600;color:var(--dark)}
+.cal-ccy{font-weight:700;color:var(--royal);white-space:nowrap}
+.cal-ev{color:var(--body)}
+.cal-ev .more{color:var(--muted);font-size:9px}
+.cal-cons{color:var(--sec);white-space:nowrap}
+.cal-chip{display:inline-block;padding:0 6px;margin-right:4px;border-radius:3px;background:var(--card);border:1px solid var(--border2);font-size:9px;color:var(--sec)}
+.cal-chip.x{background:#fff7e6;border-color:#f0c98a;color:#7a4a00;font-weight:700}
+.cal-ctx,.cal-foot{padding:4px 12px;font-family:var(--mono);font-size:8.5px;color:var(--muted);background:var(--card);border-top:1px solid var(--border);line-height:1.45}
 .setup{border:1px solid var(--border);border-radius:var(--rl);overflow:hidden;margin-bottom:11px;box-shadow:0 1px 2px rgba(13,31,78,.03)}
 .setup:last-child{margin-bottom:0}
 .setup.aaa{border-left:3px solid var(--royal)}.setup.aa{border-left:3px solid var(--royal-mid)}.setup.a{border-left:3px solid var(--green)}.setup.bbb{border-left:3px solid var(--muted)}.setup.bb{border-left:3px solid var(--border2)}.setup.b{border-left:3px solid var(--border2)}
@@ -2989,7 +3114,15 @@ tbody td{padding:5px 10px;vertical-align:middle}
   .sec-ttl{font-size:8pt!important}
   .sec-sub{font-size:7pt!important}
 
-  /* ── SETUP CARD : autoriser la fragmentation si trop grand, mais garder hdr+premier bloc solidaires ── */
+  /* ── BRIEFING CALENDAIRE ── */
+  .cal-brief{break-inside:avoid!important;page-break-inside:avoid!important;margin-bottom:6px!important}
+  .cal-brief-hdr{padding:3px 8px!important;font-size:6pt!important}
+  .cal-tbl{font-size:6.5pt!important}
+  .cal-tbl td{padding:2px 8px!important}
+  .cal-chip{font-size:6pt!important;padding:0 4px!important}
+  .cal-ctx,.cal-foot{padding:2px 8px!important;font-size:5.8pt!important}
+
+  /* ── SETUP CARD ── */
   .setup{overflow:visible!important;box-shadow:none!important;margin-bottom:6px!important;
          break-inside:auto!important;page-break-inside:auto!important}
   .setup-hdr{padding:5px 10px!important;gap:6px!important;
@@ -3090,12 +3223,28 @@ tbody td{padding:5px 10px;vertical-align:middle}
 <div class="section">
   <div class="sec-hdr"><div class="sec-num">1</div><div class="sec-ttl">Setups Valides</div><div class="sec-sub">{{n_setups}} validé(s) · Universe {{n_passed}}/{{n_total}}</div></div>
   <div class="sec-body">
-  {% if cal_time_degraded %}<div class="banner">ALERTE FUSEAU — incohérence calendaire : {{cal_time_detail}}. Résolution intraday non fiable ; fenêtres de blackout élargies par sécurité.</div>{% endif %}
-  {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
-  {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
-  {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
-  {% if cal_concerned %}<div class="banner info">PAIRES CONCERNÉES PAR UNE PUBLICATION (HIGH, S/A) — {{cal_concerned|join(' · ')}}</div>{% endif %}
-  {% if cal_source_stale or cal_source_warnings %}<div class="banner info">SIGNALÉ PAR LA SOURCE DU CALENDRIER — {% if cal_source_stale %}flux marqué is_stale{{ ' ; ' if cal_source_warnings }}{% endif %}{{cal_source_warnings|join(' ; ')}} — fraîcheur de la source à vérifier ; audit d'affichage, aucune fenêtre de risque modifiée.</div>{% endif %}
+  {% if cal_brief.alert %}<div class="banner">CALENDRIER — {{cal_brief.alert}}</div>{% endif %}
+  {% if cal_brief.events or cal_brief.context %}
+  <div class="cal-brief">
+    <div class="cal-brief-hdr"><span>Risque événementiel</span>{% if cal_brief.window %}<span class="win">{{cal_brief.window}}</span>{% endif %}</div>
+    {% if cal_brief.events %}
+    <table class="cal-tbl"><tbody>
+    {% for e in cal_brief.events %}
+      <tr>
+        <td class="cal-when">J+{{e.days}} · {{e.when}}</td>
+        <td class="cal-ccy">{{e.currency}} · {{e.tier}}</td>
+        <td class="cal-ev">{{e.label}}{% if e.extra %} <span class="more">+{{e.extra}}</span>{% endif %}</td>
+        <td class="cal-cons">{{e.consensus or '—'}}</td>
+        <td>{% for sym in e.symbols %}<span class="cal-chip{% if sym in e.crossing %} x{% endif %}">{{sym}}{% if sym in e.crossing %} ⟂{% endif %}</span>{% endfor %}</td>
+      </tr>
+    {% endfor %}
+    </tbody></table>
+    {% endif %}
+    {% if cal_brief.context %}<div class="cal-ctx">Hors book — {% for c in cal_brief.context %}{{c.currency}} {{c.label}}{% if c.extra %} +{{c.extra}}{% endif %} (J+{{c.days}}{% if c.consensus %}, {{c.consensus}}{% endif %}){% if not loop.last %} · {% endif %}{% endfor %}{% if cal_brief.n_hidden %} · +{{cal_brief.n_hidden}} autre(s){% endif %}</div>{% endif %}
+    {% if cal_brief.has_crossing %}<div class="cal-ctx">⟂ cible postérieure à la publication — la position traverse l'événement.</div>{% endif %}
+    {% if cal_brief.integrity %}<div class="cal-foot">Intégrité — {{cal_brief.integrity}}</div>{% endif %}
+  </div>
+  {% endif %}
   {% if setups %}
   {% for s in setups %}
   {% set dc = 'long' if s.direction.value == 'Bullish' else 'short' %}
@@ -3186,7 +3335,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
 </div>
 <div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
 <script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
-      <script type="application/json" id="calendar-coverage">{{ calendar_coverage_json | safe }}</script>
+<script type="application/json" id="calendar-coverage">{{ calendar_coverage_json | safe }}</script>
 </div>
 </body></html>"""
 
@@ -3204,7 +3353,8 @@ def _get_template() -> jinja2.Template:
 
 
 def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: MergeMeta,
-                  clock: Clock, calendar: Optional[CalendarSets], themes: Optional[MarketThemes],
+                  clock: Clock, calendar: Optional[CalendarSets],
+                  themes: Optional[MarketThemes],
                   n_passed: int, cfg: V4Config = CONFIG,
                   correlation_groups: Optional[dict] = None,
                   macro_regime: MacroRegime = MacroRegime.UNKNOWN,
@@ -3212,16 +3362,14 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                   cal_time_detail: str = "",
                   cal_feed_truncated: bool = False,
                   cal_feed_detail: str = "",
-                  # Bannières de fraîcheur — pur affichage (cf. load_calendar).
-                  cal_stale: bool = False,
-                  cal_stale_detail: str = "",
-                  cal_merge_stale: bool = False,
-                  cal_merge_stale_detail: str = "",
+                  # Fraîcheur croisée — en heures réelles (0.0 = rien à signaler).
+                  cal_stale_h: float = 0.0,
+                  cal_merge_stale_h: float = 0.0,
                   cal_covered_currencies: Optional[list[str]] = None,
-                  # Signal de fraîcheur auto-déclaré par la source (affichage).
                   cal_source_stale: bool = False,
                   cal_source_warnings: Optional[list[str]] = None,
-                  # Export JSON calendar-coverage (additif, défauts None).
+                  cal_source_quality: str = "VALID",
+                  cal_reachable: bool = True,
                   cal_feed_end_utc: Optional[datetime] = None,
                   cal_feed_horizon_h: Optional[float] = None,
                   version: str = __version__) -> str:
@@ -3245,7 +3393,8 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
     # Sérialisé une seule fois ici, jamais dans le template : le HTML n'est
     # qu'un support d'affichage/transport, pas une source de vérité.
     corr_json = json.dumps(correlation_groups or {}, ensure_ascii=False).replace("</", "<\\/")
-    _cov = [c.upper() for c in (cal_covered_currencies or [])]
+
+    _cov = [str(c).upper() for c in (cal_covered_currencies or [])]
     _uncovered: list[str] = []
     if _cov:
         _seen: set[str] = set()
@@ -3255,40 +3404,37 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
                 if _leg in _DESK_CURRENCIES and _leg not in _cov:
                     _seen.add(_leg)
         _uncovered = sorted(_seen)
-    # Paires réellement concernées par une publication S/A à venir — seul ce qui
-    # est concerné est publié au desk (rien sur les paires hors-sujet, cf. R6).
-    _next_event_by_ccy: dict[str, CalendarEvent] = {}
-    if calendar is not None:
-        for _ev in list(calendar.blackout) + list(calendar.proximity) + list(calendar.watch):
-            if _ev.tier not in (EventTier.S, EventTier.A):
-                continue
-            _prev = _next_event_by_ccy.get(_ev.currency)
-            if _prev is None or _ev.datetime_utc < _prev.datetime_utc:
-                _next_event_by_ccy[_ev.currency] = _ev
-    # Restreint aux setups publiés (le sujet du rapport) : une liste sur tout
-    # l'univers scanné serait aussi bruyante que la bannière qu'elle remplace.
-    _concerned: list[str] = []
-    if _next_event_by_ccy:
-        _now_utc = clock.now_utc
-        for s in setups:
-            _b, _q = _split_symbol(s.symbol)
-            _hit = _next_event_by_ccy.get(_b) or _next_event_by_ccy.get(_q)
-            if _hit is None:
-                continue
-            _j = (_hit.datetime_utc - _now_utc).total_seconds() / 86400.0
-            _concerned.append(f"{s.symbol} — {_hit.currency} {_hit.event_name} (J+{_j:.1f})")
-        _concerned.sort()
+
+    # Briefing calendaire — remplace les quatre bandeaux hérités.
+    cal_brief = build_calendar_briefing(
+        setups, calendar, clock, cfg,
+        covered=_cov,
+        feed_end_utc=cal_feed_end_utc,
+        merge_stale_h=cal_merge_stale_h,
+        cal_stale_h=cal_stale_h,
+        source_stale=cal_source_stale,
+        source_warnings=cal_source_warnings,
+        source_quality=cal_source_quality,
+        reachable=cal_reachable,
+        time_degraded=cal_time_degraded,
+        time_detail=cal_time_detail,
+    )
+    # Le détail de troncature reste disponible en journal ; il n'encombre plus
+    # la page puisque la fenêtre couverte est affichée dans l'en-tête du bloc.
+    if cal_feed_truncated and cal_feed_detail:
+        logger.info("couverture calendaire : %s", cal_feed_detail)
+
     # Export structuré de la couverture calendaire (patron correlation-groups).
-    # Additif : _cov/_uncovered sont déjà calculés pour l'export JSON.
-    # Absence de calendrier -> listes vides, feed_end_utc/horizon_h null.
     _cal_coverage = {
         "covered": _cov,
         "uncovered": _uncovered,
         "feed_end_utc": cal_feed_end_utc.isoformat() if cal_feed_end_utc else None,
         "horizon_h": (round(cal_feed_horizon_h, 2)
                       if cal_feed_horizon_h is not None else None),
+        "truncated": bool(cal_feed_truncated),
     }
     cal_coverage_json = json.dumps(_cal_coverage, ensure_ascii=False).replace("</", "<\\/")
+
     return _get_template().render(
         date_hdr=clock.date_hdr,
         date_hdr_file=date_hdr_file,
@@ -3300,19 +3446,9 @@ def render_report(setups: list[SetupV4], eliminated: list[Eliminated], meta: Mer
         max_setups=cfg.MAX_SETUPS, rr_min=cfg.RR_MIN, rr_max=cfg.RR_MAX,
         correlation_groups_json=corr_json,
         macro_regime=macro_regime.value,
-        cal_time_degraded=cal_time_degraded,
-        cal_time_detail=cal_time_detail,
-        cal_feed_truncated=cal_feed_truncated,
-        cal_feed_detail=cal_feed_detail,
-        cal_stale=cal_stale,
-        cal_stale_detail=cal_stale_detail,
-        cal_merge_stale=cal_merge_stale,
-        cal_merge_stale_detail=cal_merge_stale_detail,
+        cal_brief=cal_brief,
         cal_covered=_cov,
         cal_uncovered=_uncovered,
-        cal_concerned=_concerned,
-        cal_source_stale=cal_source_stale,
-        cal_source_warnings=cal_source_warnings or [],
         calendar_coverage_json=cal_coverage_json,
         version=version,
     )
@@ -3348,7 +3484,7 @@ def render_pdf(html: str, pdf_path: str, base_url: Optional[str] = None,
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 17 — CLI
+# SECTION 18 — CLI
 # ════════════════════════════════════════════════════════════════════════════
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
