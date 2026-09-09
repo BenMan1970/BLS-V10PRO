@@ -46,7 +46,7 @@ logger = logging.getLogger("bluestar.v10")
 
 # Bump manuel à chaque changement de comportement de grading/scoring.
 # app.py lit cet attribut via getattr(mod, "__version__", "inconnu").
-__version__ = "10.5.1"  # Briefing calendaire orienté décision : releases
+__version__ = "10.5.2"  # Briefing calendaire orienté décision : releases
                         # dédoublonnées (release_group_id), consensus vs
                         # précédent, book exposé, marqueur de traversée
                         # d'événement. Constats d'intégrité rétrogradés en
@@ -1590,7 +1590,8 @@ def _c3_trend_vs_calendar(a: CanonicalAsset, fv: FactorVector,
         extra = len(grp) - 1
         labels.append(f"{head.currency} {head.event_name}" + (f" +{extra}" if extra else ""))
     return Flag("C3", "major",
-                f"Risque calendaire élevé (MACRO={fv.get('f7_macro'):.2f}) : "
+                f"Risque calendaire élevé "
+                f"(risque={1.0 - fv.get('f7_macro'):.2f}) : "
                 + ", ".join(labels))
 
 
@@ -1737,10 +1738,12 @@ def apply_caps(a: CanonicalAsset, fv: FactorVector, cfg: V4Config = CONFIG, *,
     if macro_risk >= cfg.MACRO_CAP_RISK_THRESHOLD:
         if "f7_macro" in fv.missing:
             caps.append((Conviction.AA,
-                         "risque macro NON ÉVALUÉ (couverture calendaire "
+                         "risque calendaire NON ÉVALUÉ (couverture "
                          "insuffisante) — cap prudentiel"))
         else:
-            caps.append((Conviction.AA, f"risque macro élevé ({macro_risk:.2f})"))
+            caps.append((Conviction.AA,
+                         f"risque calendaire élevé ({macro_risk:.2f}) "
+                         f"— proximité release S/A"))
     if (a.market_context or {}).get("structural_risk") == "Critical":
         caps.append((Conviction.BBB, "risque structurel critique (REVERSAL_RISK)"))
     if flags and any(f.code == "C7" for f in flags):
@@ -2257,7 +2260,7 @@ def _rationale(a: CanonicalAsset, fv: FactorVector, themes: MarketThemes,
                flags: list[Flag], lv: Optional[LevelBundle] = None) -> str:
     if lv is None:
         lv = build_levels(a)
-    parts = [f"Score absolu {fv.absolute_mean:.2f}"]
+    parts = [f"Score brut {fv.absolute_mean:.2f}"]
     top = sorted(fv.present, key=lambda n: -fv.get(n))[:3]
     parts.append("forts: " + ", ".join(f"{n.split('_')[0].upper()}={fv.get(n):.2f}"
                                        for n in top))
@@ -2454,9 +2457,12 @@ def _pipeline_factors_and_grades(
         s.flags = [FlagModel(code=f.code, severity=f.severity, detail=f.detail)
                    for f in flags]
         cap, cap_reason = apply_caps(a, fv, config, flags=flags, regime=regime)
-        if cap_reason:
-            s.capped_reason = cap_reason
         s.conviction = grade(decayed_mean, flags, cap, config)
+        if cap is not None and cap_reason:
+            base_letter = grade(decayed_mean, flags, None, config)
+            if (_CONVICTION_ORDINAL[cap.value]
+                    < _CONVICTION_ORDINAL[base_letter.value]):
+                s.capped_reason = cap_reason
         s.rationale = _rationale(a, fv, themes, flags, lv_cache.get(s.symbol))
     return vectors, drafts, lv_cache
 
@@ -3275,19 +3281,19 @@ tbody td{padding:5px 10px;vertical-align:middle}
     <div class="setup-hdr {{dc}}">
       <span class="pair">{{s.symbol}}</span>
       <span class="dir {{dc}}">{{arrow}} {{s.direction.value}}</span>
-      <span class="conv {{cv}}">{{s.conviction.value}} ({{ '%.2f'|format(fs.absolute_mean) }})</span>
+      <span class="conv {{cv}}">{{s.conviction.value}} (ajusté {{ '%.2f'|format((fs.absolute_mean * 100) | int / 100) }})</span>
       <span class="cluster-tag">{{s.cluster}}</span>
       <span class="scen-lbl">{{s.scenario_hint}}{% if s.cal_status.value != 'OK' %} · {{s.cal_status.value}}{% endif %}</span>
     </div>
     <div class="setup-body">
       <div class="factor-grid">
-        <div class="factor"><div class="factor-lbl">F1 HWA</div><div class="factor-val {% if 'f1_hwa' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f1_hwa) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F2 RMG</div><div class="factor-val {% if 'f2_rmg' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f2_rmg) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F3 EXT</div><div class="factor-val {% if 'f3_ext' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f3_ext) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F4 TRG</div><div class="factor-val {% if 'f4_trg' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f4_trg) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F5 XCTX</div><div class="factor-val {% if 'f5_xctx' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f5_xctx) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F6 THM</div><div class="factor-val {% if 'f6_theme' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f6_theme) }}</div></div>
-        <div class="factor"><div class="factor-lbl">F7 MAC</div><div class="factor-val {% if 'f7_macro' in fs.missing %}miss{% endif %}">{{ '%.2f'|format(fs.f7_macro) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F1 HWA</div><div class="factor-val {% if 'f1_hwa' in fs.missing %}miss{% endif %}">{{ '—' if 'f1_hwa' in fs.missing else '%.2f'|format(fs.f1_hwa) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F2 RMG</div><div class="factor-val {% if 'f2_rmg' in fs.missing %}miss{% endif %}">{{ '—' if 'f2_rmg' in fs.missing else '%.2f'|format(fs.f2_rmg) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F3 EXT</div><div class="factor-val {% if 'f3_ext' in fs.missing %}miss{% endif %}">{{ '—' if 'f3_ext' in fs.missing else '%.2f'|format(fs.f3_ext) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F4 TRG</div><div class="factor-val {% if 'f4_trg' in fs.missing %}miss{% endif %}">{{ '—' if 'f4_trg' in fs.missing else '%.2f'|format(fs.f4_trg) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F5 XCTX</div><div class="factor-val {% if 'f5_xctx' in fs.missing %}miss{% endif %}">{{ '—' if 'f5_xctx' in fs.missing else '%.2f'|format(fs.f5_xctx) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F6 THM</div><div class="factor-val {% if 'f6_theme' in fs.missing %}miss{% endif %}">{{ '—' if 'f6_theme' in fs.missing else '%.2f'|format(fs.f6_theme) }}</div></div>
+        <div class="factor"><div class="factor-lbl">F7 CAL</div><div class="factor-val {% if 'f7_macro' in fs.missing %}miss{% endif %}">{{ '—' if 'f7_macro' in fs.missing else '%.2f'|format(fs.f7_macro) }}</div></div>
         <div class="factor mean"><div class="factor-lbl">Q-rang</div><div class="factor-val">{{ '%.2f'|format(fs.quantile) }}</div></div>
       </div>
       <div class="metrics-grid">
@@ -3353,7 +3359,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
 </div>
 
 </div>
-<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score absolu note, quantile départage</div>
+<div class="footer">CONFIDENTIEL · BLUESTAR SYSTEM · {{version}} · {{date_hdr}} · MAX {{max_setups}} SETUPS · RR ∈ [{{rr_min}}, {{rr_max}}] · Score ajusté note, quantile départage</div>
 <script type="application/json" id="correlation-groups">{{ correlation_groups_json | safe }}</script>
 <script type="application/json" id="calendar-coverage">{{ calendar_coverage_json | safe }}</script>
 </div>
