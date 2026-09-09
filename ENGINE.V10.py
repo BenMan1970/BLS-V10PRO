@@ -2310,7 +2310,15 @@ def _build_invalidation_contract(a, lv, cal, clock, horizon_days, horizon_event,
                     f"(×{cfg.INVALIDATION_TIME_MULT} horizon {horizon_days:.1f} j)")
     else:
         time_txt = "UNKNOWN — horizon non calculable"
-    ev_txt = horizon_event or "aucun event S/A sur base ou quote dans l'horizon"
+    if horizon_event:
+        ev_txt = horizon_event
+    else:
+        sides = {a.base, (a.quote or "")}
+        cov = set(cal.covered_currencies or ()) if cal is not None else set()
+        no_data = sorted(c for c in sides if cov and c not in cov)
+        ev_txt = (f"aucune donnée calendrier pour {', '.join(no_data)} dans le flux "
+                  f"— couverture non garantie sur cette paire") if no_data else \
+                 "aucun event S/A sur base ou quote dans l'horizon"
     return {
         "price": f"{lv.sl:.5f} (stop)",
         "time": time_txt,
@@ -3086,7 +3094,7 @@ tbody td{padding:5px 10px;vertical-align:middle}
   {% if cal_stale %}<div class="banner warn">CALENDRIER PÉRIMÉ — {{cal_stale_detail}}.</div>{% endif %}
   {% if cal_merge_stale %}<div class="banner warn">SNAPSHOT MARCHÉ ANTÉRIEUR AU CALENDRIER — {{cal_merge_stale_detail}}</div>{% endif %}
   {% if cal_feed_truncated %}<div class="banner info">COUVERTURE CALENDRIER — {{cal_feed_detail}}.</div>{% endif %}
-  {% if cal_uncovered %}<div class="banner info">DEVISES HORS COUVERTURE — {{cal_uncovered|join(', ')}} : aucun événement de ces devises dans le flux (filtre : {{cal_covered|join(', ')}}). Un statut « OK » sur une paire touchant ces devises signifie « non mesuré », pas « dégagé ».</div>{% endif %}
+  {% if cal_uncovered %}<div class="banner info">DEVISES SANS PUBLICATION DANS LE FLUX — {{cal_uncovered|join(', ')}} : aucune publication retenue (HIGH/MEDIUM) identifiée dans la fenêtre couverte pour ces devises ; seules {{cal_covered|join(', ')}} ont des publications cette semaine dans le flux public. Un statut « OK » sur une paire touchant {{cal_uncovered|join(', ')}} signifie « aucune publication détectée », pas « risque écarté ».</div>{% endif %}
   {% if cal_source_stale or cal_source_warnings %}<div class="banner info">SIGNALÉ PAR LA SOURCE DU CALENDRIER — {% if cal_source_stale %}flux marqué is_stale{{ ' ; ' if cal_source_warnings }}{% endif %}{{cal_source_warnings|join(' ; ')}} — fraîcheur de la source à vérifier ; audit d'affichage, aucune fenêtre de risque modifiée.</div>{% endif %}
   {% if setups %}
   {% for s in setups %}
@@ -3352,5 +3360,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-    
