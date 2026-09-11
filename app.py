@@ -167,8 +167,98 @@ def _clear_report_state() -> None:
         "report_base_name",
         "report_pdf_bytes",
         "report_fingerprint",
+        "report_generated_at",
+        "report_source_label",
     ):
         st.session_state.pop(key, None)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ND-011 (11/09/2026) — fraîcheur de l'artefact desk.
+# Défaut corrigé : l'app était purement bouton-dépendante ; l'HTML affiché ou
+# re-téléchargé pouvait porter l'heure d'une génération antérieure (le 10/09,
+# un desk de 13:52 a circulé à 22:53) et l'artefact ne vivait que dans la
+# session. ENGINE.V10.py reste INTACT : orchestration seule.
+# ════════════════════════════════════════════════════════════════════════════
+
+OUTPUT_DIR = APP_DIRECTORY / "output"
+
+
+def _latest_disk_file(
+    directory_text: str,
+    patterns: tuple[str, ...],
+) -> "tuple[Path, float] | None":
+    """Fichier le plus récent (mtime) du dossier surveillé correspondant à l'un
+    des motifs. None si dossier absent/vide. Le producteur amont dépose ses
+    merged_pipeline_*.json ici ; l'app les lit sans upload manuel."""
+    if not directory_text or not directory_text.strip():
+        return None
+    directory = Path(directory_text)
+    if not directory.is_dir():
+        return None
+    candidates: list[tuple[float, Path]] = []
+    for pattern in patterns:
+        for candidate in directory.glob(pattern):
+            if candidate.is_file():
+                candidates.append((candidate.stat().st_mtime, candidate))
+    if not candidates:
+        return None
+    mtime, path = max(candidates)
+    return path, mtime
+
+
+def _format_age(seconds: "float | None") -> str:
+    if seconds is None:
+        return "inconnu"
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "< 1 min"
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def _write_artifact(
+    html_text: str,
+    base_name: str,
+    resolved: dict,
+) -> None:
+    """Écrit le rapport COURANT sur disque (atomique) + sidecar méta. L'aval
+    (comité) peut consommer output/latest_desk_report.html et vérifier l'âge
+    réel via latest_desk_report.meta.json AVANT de l'utiliser. Best-effort :
+    un souci de disque ne casse jamais l'UI."""
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        payload = html_text.encode("utf-8")
+        tmp = OUTPUT_DIR / "latest_desk_report.html.tmp"
+        tmp.write_bytes(payload)
+        os.replace(tmp, OUTPUT_DIR / "latest_desk_report.html")
+
+        source_age = resolved.get("source_age_seconds")
+        sidecar = {
+            "generated_at_utc": datetime.now(
+                timezone.utc
+            ).isoformat(timespec="seconds"),
+            "report_base_name": base_name,
+            "size_bytes": len(payload),
+            "input_fingerprint": resolved.get("fingerprint"),
+            "source": resolved.get("source_label"),
+            "source_age_seconds": source_age,
+            "stale": bool(
+                source_age is not None
+                and source_age > max_source_age_minutes * 60
+            ),
+        }
+        tmp_meta = OUTPUT_DIR / "latest_desk_report.meta.json.tmp"
+        tmp_meta.write_text(
+            json.dumps(sidecar, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(
+            tmp_meta, OUTPUT_DIR / "latest_desk_report.meta.json"
+        )
+    except OSError:
+        pass
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -348,6 +438,41 @@ with st.sidebar:
             + ("actif" if has_native_pdf else "inactif")
             + "`"
         )
+
+    st.divider()
+    st.markdown("### Rafraîchissement (ND-011)")
+    auto_refresh_minutes = st.number_input(
+        "Veille auto (minutes, 0 = manuel)",
+        min_value=0,
+        max_value=240,
+        value=5,
+        step=1,
+        key="auto_refresh_minutes",
+        help="Tant qu'un onglet de l'application reste ouvert, les entrées "
+             "sont re-vérifiées à cet intervalle et le rapport est régénéré "
+             "UNIQUEMENT si les DONNEES ont change (empreinte). Jamais sur "
+             "simple ecoulement du temps : l'heure du rapport doit toujours "
+             "reflecher l'heure des donnees.",
+    )
+    data_dir_text = st.text_input(
+        "Dossier surveillé (merged JSON)",
+        value=os.environ.get("BLUESTAR_DESK_DATA_DIR", ""),
+        key="data_dir_text",
+        help="Chemin du dossier où le pipeline amont dépose "
+             "merged_pipeline_*.json (et calendar*.json). L'upload manuel "
+             "reste prioritaire. Env BLUESTAR_DESK_DATA_DIR par défaut.",
+    )
+    max_source_age_minutes = st.number_input(
+        "Données jugées périmées au-delà (minutes)",
+        min_value=5,
+        max_value=1440,
+        value=60,
+        step=5,
+        key="max_source_age_minutes",
+        help="Au-delà de cet âge des données sources (mtime du merged), "
+             "bandeau rouge « HEURE DÉPASSÉE » et champ stale=true dans le "
+             "sidecar output/latest_desk_report.meta.json.",
+    )
 
     if st.button(
         "Vider les caches",
@@ -633,134 +758,347 @@ for error in input_errors:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Gestion de l’état du rapport
+# Session fraîcheur (ND-011) : entrées effectives, génération, preview
 # ════════════════════════════════════════════════════════════════════════════
 
-current_fingerprint = _input_fingerprint(
-    merged_bytes,
-    calendar_bytes,
-)
+def _validate_disk_merged(data: dict) -> list:
+    """Validation minimale du merged lu sur disque (mêmes contrats que
+    l’upload : meta dict, assets non vide, schéma >= MIN_MERGE_SCHEMA)."""
+    errors: list = []
+    meta = data.get("meta")
+    assets = data.get("assets")
+    if not isinstance(meta, dict):
+        return ["Merged JSON (disque) : `meta` absent ou invalide."]
+    if not isinstance(assets, dict) or not assets:
+        return ["Merged JSON (disque) : aucun actif disponible."]
+    schema_version = _parse_schema_version(meta.get("version"))
+    if schema_version is None:
+        errors.append("Merged JSON (disque) : `meta.version` absente.")
+    elif schema_version < MIN_MERGE_SCHEMA:
+        errors.append(
+            "Merged JSON (disque) : schéma "
+            + str(meta.get("version"))
+            + " < minimum "
+            + ".".join(map(str, MIN_MERGE_SCHEMA))
+            + "."
+        )
+    return errors
 
-stored_fingerprint = st.session_state.get(
-    "report_fingerprint"
-)
 
-if (
-    stored_fingerprint is not None
-    and current_fingerprint != stored_fingerprint
-):
-    _clear_report_state()
+def _effective_inputs() -> dict:
+    """Upload prioritaire ; sinon fichier le plus récent du dossier surveillé.
+    La clé d’auto-raîchissement est l’empreinte des DONNÉES (contenu), pas
+    l’horloge : un merged inchangé ne régénère jamais — l’heure affichée doit
+    rester l’heure des données."""
+    if merged_bytes is not None:
+        return {
+            "merged_bytes": merged_bytes,
+            "merged_data": merged_data,
+            "calendar_bytes": calendar_bytes,
+            "fingerprint": _input_fingerprint(merged_bytes, calendar_bytes),
+            "source_label": "upload « " + merged_file.name + " »",
+            "source_age_seconds": None,
+            "errors": list(input_errors),
+        }
 
+    found = _latest_disk_file(
+        data_dir_text, ("merged*.json", "merged*.txt", "*merged*.json")
+    )
+    if found is None:
+        return {
+            "merged_bytes": None,
+            "merged_data": None,
+            "calendar_bytes": None,
+            "fingerprint": None,
+            "source_label": "aucune source",
+            "source_age_seconds": None,
+            "errors": [],
+        }
 
-# ════════════════════════════════════════════════════════════════════════════
-# Exécution
-# ════════════════════════════════════════════════════════════════════════════
+    path, mtime = found
+    source_age = (
+        datetime.now(timezone.utc)
+        - datetime.fromtimestamp(mtime, timezone.utc)
+    ).total_seconds()
 
-generation_disabled = (
-    merged_bytes is None
-    or bool(input_errors)
-)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {
+            "merged_bytes": None,
+            "merged_data": None,
+            "calendar_bytes": None,
+            "fingerprint": None,
+            "source_label": path.name,
+            "source_age_seconds": source_age,
+            "errors": ["Lecture du merged surveillé impossible : " + str(exc)],
+        }
 
-generate_clicked = st.button(
-    "Générer le rapport",
-    type="primary",
-    use_container_width=True,
-    disabled=generation_disabled,
-)
+    try:
+        data = _decode_json_bytes(raw, label="Merged JSON (disque)")
+    except ValueError as exc:
+        return {
+            "merged_bytes": None,
+            "merged_data": None,
+            "calendar_bytes": None,
+            "fingerprint": None,
+            "source_label": path.name,
+            "source_age_seconds": source_age,
+            "errors": [str(exc)],
+        }
 
-if generate_clicked:
-    assert merged_bytes is not None
-    assert merged_data is not None
-
-    with st.spinner(
-        "Scoring, contrôles de risque et génération du rapport..."
-    ):
+    cal_bytes = None
+    cal_found = _latest_disk_file(data_dir_text, ("calendar*.json",))
+    if cal_found is not None:
         try:
-            with tempfile.TemporaryDirectory(
-                prefix="bluestar_"
-            ) as temporary_directory:
-                temporary_path = Path(temporary_directory)
+            cal_bytes = cal_found[0].read_bytes()
+        except OSError:
+            cal_bytes = None
 
-                merged_path = temporary_path / "merged.json"
-                calendar_path = temporary_path / "calendar.json"
-                output_path = temporary_path / "report.html"
-                pdf_path = temporary_path / "report.pdf"
+    return {
+        "merged_bytes": raw,
+        "merged_data": data,
+        "calendar_bytes": cal_bytes,
+        "fingerprint": _input_fingerprint(raw, cal_bytes),
+        "source_label": path.name,
+        "source_age_seconds": source_age,
+        "errors": _validate_disk_merged(data),
+    }
 
-                merged_path.write_bytes(merged_bytes)
 
-                pipeline_arguments: dict[str, Any] = {
-                    "merged_path": str(merged_path),
-                    "output_path": str(output_path),
-                }
+def _generate_report(resolved: dict):
+    """Lance run_pipeline sur les entrées résolues ; met à jour la session et
+    l’artefact output/. Retour None si OK, sinon le message d’erreur."""
+    if resolved["merged_bytes"] is None or resolved["errors"]:
+        return "aucune entrée exploitable"
 
-                if has_native_pdf:
-                    pipeline_arguments["pdf_path"] = str(pdf_path)
+    with tempfile.TemporaryDirectory(prefix="bluestar_") as temporary_directory:
+        try:
+            temporary_path = Path(temporary_directory)
+            merged_path = temporary_path / "merged.json"
+            calendar_path = temporary_path / "calendar.json"
+            output_path = temporary_path / "report.html"
+            pdf_path = temporary_path / "report.pdf"
 
-                if calendar_bytes is not None:
-                    calendar_path.write_bytes(calendar_bytes)
-                    pipeline_arguments["calendar_json_path"] = str(
-                        calendar_path
-                    )
+            merged_path.write_bytes(resolved["merged_bytes"])
 
-                report_html = run_pipeline(
-                    **pipeline_arguments
+            pipeline_arguments = {
+                "merged_path": str(merged_path),
+                "output_path": str(output_path),
+            }
+
+            if has_native_pdf:
+                pipeline_arguments["pdf_path"] = str(pdf_path)
+
+            if resolved["calendar_bytes"] is not None:
+                calendar_path.write_bytes(resolved["calendar_bytes"])
+                pipeline_arguments["calendar_json_path"] = str(calendar_path)
+
+            report_html = run_pipeline(**pipeline_arguments)
+
+            if not isinstance(report_html, str) or not report_html.strip():
+                raise RuntimeError("Le moteur n’a retourné aucun HTML.")
+
+            normalized_html = report_html.lower()
+            if (
+                "<html" not in normalized_html
+                or "</html>" not in normalized_html
+            ):
+                raise RuntimeError(
+                    "Le résultat du moteur n’est pas un document HTML complet."
                 )
 
-                if (
-                    not isinstance(report_html, str)
-                    or not report_html.strip()
-                ):
-                    raise RuntimeError(
-                        "Le moteur n’a retourné aucun HTML."
-                    )
+            report_pdf_bytes = None
+            if pdf_path.is_file() and pdf_path.stat().st_size > 0:
+                report_pdf_bytes = pdf_path.read_bytes()
+                if not report_pdf_bytes.startswith(b"%PDF-"):
+                    report_pdf_bytes = None
 
-                normalized_html = report_html.lower()
+            report_date = _report_date_from_merged(resolved["merged_data"])
+            base_name = "BLUESTAR FX Desk_Signal Report_" + report_date
 
-                if (
-                    "<html" not in normalized_html
-                    or "</html>" not in normalized_html
-                ):
-                    raise RuntimeError(
-                        "Le résultat du moteur n’est pas un document "
-                        "HTML complet."
-                    )
+            st.session_state["report_base_name"] = base_name
+            st.session_state["report_html"] = report_html
+            st.session_state["report_pdf_bytes"] = report_pdf_bytes
+            st.session_state["report_fingerprint"] = resolved["fingerprint"]
+            st.session_state["report_generated_at"] = datetime.now(
+                timezone.utc
+            ).isoformat(timespec="seconds")
+            st.session_state["report_source_label"] = resolved["source_label"]
 
-                report_pdf_bytes: bytes | None = None
-
-                if pdf_path.is_file() and pdf_path.stat().st_size > 0:
-                    report_pdf_bytes = pdf_path.read_bytes()
-
-                    if not report_pdf_bytes.startswith(b"%PDF-"):
-                        report_pdf_bytes = None
-
-                report_date = _report_date_from_merged(
-                    merged_data
-                )
-
-                st.session_state["report_base_name"] = (
-                    f"BLUESTAR FX Desk_Signal Report_{report_date}"
-                )
-                st.session_state["report_html"] = report_html
-                st.session_state["report_pdf_bytes"] = (
-                    report_pdf_bytes
-                )
-                st.session_state["report_fingerprint"] = (
-                    current_fingerprint
-                )
-
-            st.success("Rapport généré avec succès.")
+            _write_artifact(report_html, base_name, resolved)
+            return None
 
         except Exception as exc:  # noqa: BLE001
             _clear_report_state()
+            return type(exc).__name__ + ": " + str(exc)
 
-            st.error(
-                f"Erreur pipeline : {type(exc).__name__}: {exc}"
+
+def _freshness_banner(resolved: dict) -> None:
+    """Cœur de ND-011 : l’âge des DONNÉES est affiché en permanence — plus
+    jamais un HTML à heure dépassée ne circule sans marqueur visible."""
+    if not st.session_state.get("report_html"):
+        st.info(
+            "Aucun rapport dans cette session — « Générer le rapport », ou "
+            "déposer un merged JSON dans le dossier surveillé (le "
+            "rafraîchissement automatique le prendra en charge)."
+        )
+        return
+
+    gen_txt = "inconnue"
+    generated_at = st.session_state.get("report_generated_at")
+    if isinstance(generated_at, str):
+        try:
+            gen_dt = datetime.fromisoformat(generated_at)
+            gen_age = (
+                datetime.now(timezone.utc) - gen_dt
+            ).total_seconds()
+            gen_txt = (
+                gen_dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                + " (âgé de " + _format_age(gen_age) + ")"
             )
-            st.exception(exc)
+        except ValueError:
+            pass
 
+    src_txt = "source : " + str(resolved["source_label"])
+    if resolved["source_age_seconds"] is not None:
+        src_txt += (
+            ", données âgées de "
+            + _format_age(resolved["source_age_seconds"])
+        )
+
+    stale = (
+        resolved["source_age_seconds"] is not None
+        and resolved["source_age_seconds"] > max_source_age_minutes * 60
+    )
+    if stale:
+        st.error(
+            "⛔ DONNÉES SOURCES PÉRIMÉES (seuil "
+            + str(int(max_source_age_minutes))
+            + " min) — ce rapport porte une HEURE DÉPASSÉE ; ne pas le "
+            "transmettre au comité en l’état. " + src_txt
+            + ". Généré : " + gen_txt + "."
+        )
+    else:
+        veille = (
+            " Veille auto toutes les "
+            + str(int(auto_refresh_minutes))
+            + " min."
+            if auto_refresh_minutes
+            else ""
+        )
+        st.success(
+            "🟢 Rapport courant — " + src_txt + ". Généré : " + gen_txt + "."
+            + veille
+        )
+
+
+@st.fragment(
+    run_every=(
+        int(auto_refresh_minutes) * 60 if auto_refresh_minutes else None
+    )
+)
+def _desk_session() -> None:
+    resolved = _effective_inputs()
+    _freshness_banner(resolved)
+
+    # En mode dossier surveillé, les erreurs de validation n'ont pas été
+    # affichées au niveau racine (boucle réservée à l'upload) : les rendre ici.
+    if merged_bytes is None:
+        for error in resolved['errors']:
+            st.error(error)
+
+    stored_fingerprint = st.session_state.get("report_fingerprint")
+    if (
+        stored_fingerprint is not None
+        and resolved["fingerprint"] is not None
+        and stored_fingerprint != resolved["fingerprint"]
+    ):
+        _clear_report_state()
+
+    # Auto-regeneration : UNIQUEMENT quand des donnees nouvelles (ou jamais
+    # exploitees) sont presentes — jamais pour « rajeunir » l’horodatage sur
+    # des donnees inchangees.
+    auto_error = None
+    if (
+        resolved["merged_bytes"] is not None
+        and not resolved["errors"]
+        and st.session_state.get("report_fingerprint") is None
+    ):
+        auto_error = _generate_report(resolved)
+        if auto_error is None:
+            st.toast("Rapport régénéré automatiquement (données nouvelles).")
+
+    generation_disabled = (
+        resolved["merged_bytes"] is None or bool(resolved["errors"])
+    )
+    generate_clicked = st.button(
+        "Générer le rapport",
+        type="primary",
+        use_container_width=True,
+        disabled=generation_disabled,
+    )
+
+    if generate_clicked:
+        with st.spinner(
+            "Scoring, contrôles de risque et génération du rapport..."
+        ):
+            error = _generate_report(resolved)
+        if error:
+            st.error("Erreur pipeline : " + error)
+
+    if auto_error:
+        st.error("Régénération automatique échouée : " + str(auto_error))
+
+    # ─── Aperçu (vit dans le fragment : il se rafraîchit à chaque veille) ─
+    report_html_state = st.session_state.get("report_html")
+
+    if isinstance(report_html_state, str) and report_html_state:
+        preview_tab, source_tab = st.tabs(["Aperçu", "Diagnostic HTML"])
+
+        with preview_tab:
+            st_html(report_html_state, height=1800, scrolling=True)
+
+        with source_tab:
+            st.metric(
+                "Taille HTML",
+                str(len(report_html_state)) + " caractères",
+            )
+            st.code(
+                report_html_state[:5000]
+                + (
+                    "\n\n<!-- aperçu tronqué -->"
+                    if len(report_html_state) > 5000
+                    else ""
+                ),
+                language="html",
+            )
+
+        st.caption(
+            "Artefact courant : "
+            + str(OUTPUT_DIR / "latest_desk_report.html")
+            + " — mis à jour à chaque génération ; le sidecar "
+            "latest_desk_report.meta.json porte l’horodatage exact et le "
+            "flag stale (à vérifier par l’aval avant usage)."
+        )
+    elif resolved["merged_bytes"] is None:
+        st.info(
+            "Charge un merged JSON (upload ou dossier surveillé) pour lancer "
+            "le pipeline."
+        )
+    elif resolved["errors"]:
+        st.info(
+            "Corrige les erreurs de validation avant de lancer le pipeline."
+        )
+
+
+_desk_session()
 
 # ════════════════════════════════════════════════════════════════════════════
-# Affichage et téléchargements
+# Téléchargements — niveau racine. Les st.download_button restent VOLONTAI-
+# REMENT hors du fragment (compatibilité stricte toutes versions Streamlit ;
+# leur re-déclenchement complet n’est jamais requis). La source constante
+# pour l’automatisation reste output/latest_desk_report.html (+ sidecar).
 # ════════════════════════════════════════════════════════════════════════════
 
 report_html_state = st.session_state.get("report_html")
@@ -772,58 +1110,40 @@ if isinstance(report_html_state, str) and report_html_state:
             "BLUESTAR FX Desk_Signal Report",
         )
     )
-
-    report_pdf_state = st.session_state.get(
-        "report_pdf_bytes"
-    )
-
-    preview_tab, source_tab = st.tabs(
-        ["Aperçu", "Diagnostic HTML"]
-    )
-
-    with preview_tab:
-        st_html(
-            report_html_state,
-            height=1800,
-            scrolling=True,
-        )
-
-    with source_tab:
-        st.metric(
-            "Taille HTML",
-            f"{len(report_html_state):,} caractères".replace(",", " "),
-        )
-        st.code(
-            report_html_state[:5000]
-            + (
-                "\n\n<!-- aperçu tronqué -->"
-                if len(report_html_state) > 5000
-                else ""
-            ),
-            language="html",
-        )
+    report_pdf_state = st.session_state.get("report_pdf_bytes")
 
     st.divider()
 
     download_column_1, download_column_2, download_column_3 = st.columns(3)
 
     _journal_path = Path(__file__).resolve().parent / "v10_journal.csv"
+
     with download_column_3:
         st.download_button(
             label="Journal de calibration v10 (CSV)",
-            data=_journal_path.read_bytes() if _journal_path.exists() else b"",
-            file_name=f"v10_journal_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}Z.csv",
+            data=(
+                _journal_path.read_bytes()
+                if _journal_path.exists()
+                else b""
+            ),
+            file_name=(
+                "v10_journal_"
+                + format(datetime.now(timezone.utc), "%Y%m%d_%H%M%S")
+                + "Z.csv"
+            ),
             mime="text/csv",
             use_container_width=True,
             disabled=not _journal_path.exists(),
-            help="Une ligne par actif et par scan : decisions completes du moteur. A conserver : sert a etalonner age et calendrier sur donnees reelles (30/60/90 j).",
+            help="Une ligne par actif et par scan : decisions completes du "
+                 "moteur. A conserver : sert a etalonner age et calendrier "
+                 "sur donnees reelles (30/60/90 j).",
         )
 
     with download_column_1:
         st.download_button(
             label="Télécharger le rapport HTML A4",
             data=report_html_state.encode("utf-8"),
-            file_name=f"{report_base_name}.html",
+            file_name=report_base_name + ".html",
             mime="text/html",
             use_container_width=True,
         )
@@ -836,7 +1156,7 @@ if isinstance(report_html_state, str) and report_html_state:
             st.download_button(
                 label="Télécharger le rapport PDF",
                 data=report_pdf_state,
-                file_name=f"{report_base_name}.pdf",
+                file_name=report_base_name + ".pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
@@ -847,16 +1167,6 @@ if isinstance(report_html_state, str) and report_html_state:
                 "puis utilise **Imprimer → Enregistrer en PDF**, "
                 "format A4, échelle 100 %."
             )
-
-elif merged_bytes is None:
-    st.info(
-        "Charge un merged JSON pour lancer le pipeline."
-    )
-
-elif input_errors:
-    st.info(
-        "Corrige les erreurs de validation avant de lancer le pipeline."
-    )
 
 
 
